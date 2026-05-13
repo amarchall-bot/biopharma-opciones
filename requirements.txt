@@ -1,0 +1,6 @@
+yfinance==0.2.54
+pandas
+pyotp
+requests
+beautifulsoup4
+lxml

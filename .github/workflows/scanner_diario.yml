@@ -1,0 +1,32 @@
+name: Scanner Opciones Biopharma
+
+on:
+  schedule:
+    # 8:30am hora española (UTC+2 verano / UTC+1 invierno)
+    # Usamos 6:30 UTC (verano CEST). Ajustar a 7:30 en invierno.
+    - cron: '30 6 * * 1-5'
+  workflow_dispatch:  # permite ejecutarlo manualmente desde GitHub
+
+jobs:
+  enviar-radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar scanner y enviar email
+        env:
+          EMAIL_ORIGEN: ${{ secrets.EMAIL_ORIGEN }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: python opciones_biopharma.py

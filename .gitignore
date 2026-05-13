@@ -1,0 +1,6 @@
+.biopharma_env
+biopharma.log
+__pycache__/
+*.pyc
+configurar.py
+instalar_tarea_diaria.sh
