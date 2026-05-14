@@ -8,6 +8,7 @@ import requests
 import smtplib
 import os
 import time
+import yfinance as yf
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date
@@ -77,59 +78,6 @@ TRADIER_HEADERS = {
 TRADIER_BASE = "https://api.tradier.com/v1/markets"
 
 
-# ─── TRADIER API ──────────────────────────────────────────────────────────────
-
-def tradier_get(endpoint, params):
-    """Llamada a la API de Tradier con reintentos."""
-    for intento in range(3):
-        try:
-            r = requests.get(
-                f"{TRADIER_BASE}{endpoint}",
-                params=params,
-                headers=TRADIER_HEADERS,
-                timeout=10
-            )
-            if r.status_code == 200:
-                return r.json()
-            time.sleep(1)
-        except Exception:
-            time.sleep(2)
-    return None
-
-
-def obtener_precio(ticker):
-    """Precio actual via Tradier."""
-    data = tradier_get("/quotes", {"symbols": ticker})
-    try:
-        return float(data["quotes"]["quote"]["last"] or 0)
-    except Exception:
-        return 0.0
-
-
-def obtener_vencimientos(ticker):
-    """Lista de fechas de vencimiento disponibles."""
-    data = tradier_get("/options/expirations", {"symbol": ticker})
-    try:
-        fechas = data["expirations"]["date"]
-        return fechas if isinstance(fechas, list) else [fechas]
-    except Exception:
-        return []
-
-
-def obtener_cadena_opciones(ticker, fecha):
-    """Cadena de opciones completa para un ticker y vencimiento."""
-    data = tradier_get("/options/chains", {
-        "symbol": ticker,
-        "expiration": fecha,
-        "greeks": "false"
-    })
-    try:
-        opciones = data["options"]["option"]
-        return opciones if isinstance(opciones, list) else [opciones]
-    except Exception:
-        return []
-
-
 # ─── ANALISIS ─────────────────────────────────────────────────────────────────
 
 def score_anomalia(volume, ratio):
@@ -141,69 +89,68 @@ def score_anomalia(volume, ratio):
 
 
 def analizar_ticker(ticker, nombre):
-    anomalias   = []
-    precio      = obtener_precio(ticker)
-    vencimientos = obtener_vencimientos(ticker)
+    """Busca opciones con volumen anomalo usando Yahoo Finance."""
+    anomalias = []
+    try:
+        stock         = yf.Ticker(ticker)
+        precio        = round(getattr(stock.fast_info, "last_price", 0) or 0, 2)
+        vencimientos  = stock.options
 
-    if precio == 0 or not vencimientos:
-        return anomalias
+        if precio == 0 or not vencimientos:
+            return anomalias
 
-    for fecha in vencimientos[:MAX_VENCIMIENTOS]:
-        opciones = obtener_cadena_opciones(ticker, fecha)
-
-        for op in opciones:
-            try:
-                volumen  = int(op.get("volume") or 0)
-                oi       = int(op.get("open_interest") or 0)
-                strike   = float(op.get("strike") or 0)
-                tipo     = op.get("option_type", "").upper()  # "call" o "put"
-                precio_op = float(op.get("last") or 0)
-
-                if volumen < MIN_VOLUMEN or oi < MIN_OPEN_INTEREST or strike == 0:
+        for fecha in vencimientos[:MAX_VENCIMIENTOS]:
+            chain = stock.option_chain(fecha)
+            for tipo_label, df in [("CALL", chain.calls), ("PUT", chain.puts)]:
+                if df.empty:
                     continue
-
-                ratio = volumen / oi
-                if ratio < UMBRAL_VOL_OI:
+                df = df.copy()
+                df = df[(df["volume"] >= MIN_VOLUMEN) & (df["openInterest"] >= MIN_OPEN_INTEREST)]
+                if df.empty:
                     continue
+                df["ratio"] = df["volume"] / df["openInterest"]
+                df = df[df["ratio"] >= UMBRAL_VOL_OI]
 
-                tipo_label = "CALL" if tipo == "CALL" else "PUT"
-                es_otm = (tipo_label == "CALL" and strike > precio) or \
-                         (tipo_label == "PUT"  and strike < precio)
-                variacion_pct = round(abs(strike - precio) / precio * 100, 1) if precio > 0 else 0
+                for _, row in df.iterrows():
+                    strike    = row["strike"]
+                    es_otm    = (tipo_label == "CALL" and strike > precio) or \
+                                (tipo_label == "PUT"  and strike < precio)
+                    var_pct   = round(abs(strike - precio) / precio * 100, 1) if precio > 0 else 0
+                    precio_op = round(float(row.get("lastPrice") or 0), 2)
 
-                anomalias.append({
-                    "ticker":         ticker,
-                    "nombre":         nombre,
-                    "tipo":           tipo_label,
-                    "strike":         strike,
-                    "vencimiento":    fecha,
-                    "volumen":        volumen,
-                    "open_interest":  oi,
-                    "ratio":          round(ratio, 1),
-                    "precio_actual":  round(precio, 2),
-                    "otm":            es_otm,
-                    "variacion_pct":  variacion_pct,
-                    "score":          score_anomalia(volumen, round(ratio, 1)),
-                    "earnings":       None,
-                    "ultimo_precio_opcion": precio_op,
-                })
-            except Exception:
-                continue
-
+                    anomalias.append({
+                        "ticker":              ticker,
+                        "nombre":              nombre,
+                        "tipo":                tipo_label,
+                        "strike":              strike,
+                        "vencimiento":         fecha,
+                        "volumen":             int(row["volume"]),
+                        "open_interest":       int(row["openInterest"]),
+                        "ratio":               round(row["ratio"], 1),
+                        "precio_actual":       precio,
+                        "otm":                 es_otm,
+                        "variacion_pct":       var_pct,
+                        "score":               score_anomalia(int(row["volume"]), round(row["ratio"], 1)),
+                        "earnings":            None,
+                        "ultimo_precio_opcion": precio_op,
+                    })
+    except Exception:
+        pass
     return anomalias
 
 
 # ─── RATIO PUT/CALL POR EMPRESA ───────────────────────────────────────────────
 
 def calcular_ratio_put_call(ticker):
-    """Calcula el ratio put/call total para el primer vencimiento."""
+    """Calcula el ratio put/call total para el primer vencimiento via Yahoo Finance."""
     try:
-        vencimientos = obtener_vencimientos(ticker)
-        if not vencimientos:
+        stock = yf.Ticker(ticker)
+        fechas = stock.options
+        if not fechas:
             return None
-        opciones = obtener_cadena_opciones(ticker, vencimientos[0])
-        vol_calls = sum(int(o.get("volume") or 0) for o in opciones if o.get("option_type","").upper() == "CALL")
-        vol_puts  = sum(int(o.get("volume") or 0) for o in opciones if o.get("option_type","").upper() == "PUT")
+        chain = stock.option_chain(fechas[0])
+        vol_calls = chain.calls["volume"].fillna(0).sum()
+        vol_puts  = chain.puts["volume"].fillna(0).sum()
         if vol_calls == 0:
             return None
         return round(vol_puts / vol_calls, 2)
@@ -313,7 +260,7 @@ def construir_email(todas_anomalias, ratios_pc):
     <div style="font-family:Arial,sans-serif;max-width:680px;margin:auto;color:#1a1a1a">
     <div style="background:#1a1a2e;color:white;padding:20px;border-radius:10px;margin-bottom:20px">
         <h1 style="margin:0;font-size:22px">📊 Radar de Opciones Inusuales</h1>
-        <p style="margin:6px 0 0 0;opacity:0.8">{hoy} · {len(todas_anomalias)} señales · datos en tiempo real via Tradier</p>
+        <p style="margin:6px 0 0 0;opacity:0.8">{hoy} · {len(todas_anomalias)} señales detectadas hoy</p>
     </div>
     <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
         <tr>
@@ -436,8 +383,8 @@ def enviar_email(cuerpo_html, n_anomalias):
         print("ERROR: faltan credenciales de email.")
         return False
 
-    asunto = f"🚨 Radar Opciones — {n_anomalias} señales — {datetime.now().strftime('%d/%m/%Y')}" \
-             if n_anomalias > 0 else f"😴 Radar Opciones — Sin señales hoy — {datetime.now().strftime('%d/%m/%Y')}"
+    asunto = f"Radar Opciones — {n_anomalias} señales detectadas — {datetime.now().strftime('%d/%m/%Y')}" \
+             if n_anomalias > 0 else f"Radar Opciones — Sin actividad inusual hoy — {datetime.now().strftime('%d/%m/%Y')}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = asunto
@@ -460,7 +407,7 @@ def enviar_email(cuerpo_html, n_anomalias):
 
 def main():
     total = len(TODOS_TICKERS)
-    print(f"Analizando {total} empresas via Tradier API...\n")
+    print(f"Analizando {total} empresas...\n")
 
     todas    = []
     ratios_pc = {}
