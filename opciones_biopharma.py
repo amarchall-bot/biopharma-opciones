@@ -8,10 +8,14 @@ import requests
 import smtplib
 import os
 import time
+import json
+import uuid
 import yfinance as yf
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date
+
+TRACK_RECORD_FILE = "track_record.json"
 
 # ─── EMPRESAS A VIGILAR ───────────────────────────────────────────────────────
 
@@ -367,10 +371,13 @@ def construir_email(todas_anomalias, ratios_pc):
             </div>
         </div>""")
 
+    # Track record (se pasa como parametro)
+    html.append("<!-- TRACK_RECORD_PLACEHOLDER -->")
+
     html.append("""
-    <div style="background:#f6f8fa;border-radius:8px;padding:16px;font-size:12px;color:#666;margin-top:10px">
+    <div style="background:#f6f8fa;border-radius:8px;padding:16px;font-size:12px;color:#666;margin-top:16px">
         <b>⚠️ Aviso:</b> Solo informativo. Las opciones son instrumentos de alto riesgo.
-        Puedes perder toda la cantidad invertida. Consulta con un asesor financiero. Datos via Tradier API.
+        Puedes perder toda la cantidad invertida. Consulta con un asesor financiero.
     </div></div>""")
 
     return "\n".join(html)
@@ -403,13 +410,273 @@ def enviar_email(cuerpo_html, n_anomalias):
         return False
 
 
+# ─── TRACK RECORD ────────────────────────────────────────────────────────────
+
+def cargar_track_record():
+    try:
+        with open(TRACK_RECORD_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def guardar_track_record(registros):
+    with open(TRACK_RECORD_FILE, "w") as f:
+        json.dump(registros, f, indent=2, default=str)
+
+
+def obtener_precio_historico(ticker, fecha_str):
+    """Precio de cierre de una accion en una fecha concreta."""
+    try:
+        datos = yf.download(ticker, start=fecha_str, end=fecha_str, progress=False, auto_adjust=True)
+        if datos.empty:
+            # Si cae en fin de semana, coger el siguiente dia habil
+            import pandas as pd
+            fecha = datetime.strptime(fecha_str, "%Y-%m-%d")
+            for offset in range(1, 5):
+                siguiente = (fecha + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
+                siguiente_fin = (fecha + pd.Timedelta(days=offset+1)).strftime("%Y-%m-%d")
+                datos = yf.download(ticker, start=siguiente, end=siguiente_fin, progress=False, auto_adjust=True)
+                if not datos.empty:
+                    break
+        if not datos.empty:
+            return round(float(datos["Close"].iloc[-1]), 2)
+    except Exception:
+        pass
+    return None
+
+
+def registrar_nuevas_señales(anomalias, registros_existentes):
+    """Añade las señales de hoy al track record si no existen ya."""
+    ids_existentes = {r["id"] for r in registros_existentes}
+    nuevos = 0
+    for a in anomalias:
+        # Clave unica: ticker + tipo + strike + vencimiento + fecha_señal
+        clave = f"{a['ticker']}-{a['tipo']}-{a['strike']}-{a['vencimiento']}-{date.today()}"
+        if clave in ids_existentes:
+            continue
+        registros_existentes.append({
+            "id":                    clave,
+            "fecha_señal":           str(date.today()),
+            "ticker":                a["ticker"],
+            "nombre":                a["nombre"],
+            "tipo":                  a["tipo"],
+            "strike":                a["strike"],
+            "vencimiento":           a["vencimiento"],
+            "precio_accion_señal":   a["precio_actual"],
+            "precio_opcion_señal":   a["ultimo_precio_opcion"],
+            "score":                 a["score"],
+            "ratio":                 a["ratio"],
+            "otm":                   a["otm"],
+            "variacion_necesaria_pct": a["variacion_pct"],
+            "estado":                "pendiente",
+            "precio_accion_vencimiento": None,
+            "precio_spy_señal":      None,
+            "precio_spy_vencimiento": None,
+            "resultado":             None,
+            "ganancia_opcion_pct":   None,
+            "ganancia_spy_pct":      None,
+            "fecha_evaluacion":      None,
+        })
+        nuevos += 1
+    return nuevos
+
+
+def evaluar_señales_vencidas(registros):
+    """Comprueba las señales cuya fecha de vencimiento ya paso y calcula resultado."""
+    hoy        = date.today()
+    evaluados  = 0
+
+    for r in registros:
+        if r["estado"] != "pendiente":
+            continue
+        try:
+            fecha_venc = datetime.strptime(r["vencimiento"], "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        if fecha_venc > hoy:
+            continue  # aun no ha vencido
+
+        # Obtener precio al vencimiento
+        precio_venc = obtener_precio_historico(r["ticker"], r["vencimiento"])
+        if precio_venc is None:
+            continue
+
+        # Obtener precio SPY en fecha señal y vencimiento (benchmark)
+        precio_spy_señal = obtener_precio_historico("SPY", r["fecha_señal"]) or 0
+        precio_spy_venc  = obtener_precio_historico("SPY", r["vencimiento"]) or 0
+
+        precio_señal = r["precio_accion_señal"]
+        strike       = r["strike"]
+        tipo         = r["tipo"]
+
+        # ¿Habria ganado la opcion?
+        if tipo == "CALL":
+            en_dinero = precio_venc > strike
+            variacion_real = round((precio_venc - precio_señal) / precio_señal * 100, 2)
+        else:
+            en_dinero = precio_venc < strike
+            variacion_real = round((precio_señal - precio_venc) / precio_señal * 100, 2)
+
+        ganancia_spy = round((precio_spy_venc - precio_spy_señal) / precio_spy_señal * 100, 2) \
+                       if precio_spy_señal > 0 else 0
+
+        r["estado"]                  = "ganancia" if en_dinero else "perdida"
+        r["precio_accion_vencimiento"] = precio_venc
+        r["precio_spy_señal"]        = precio_spy_señal
+        r["precio_spy_vencimiento"]  = precio_spy_venc
+        r["resultado"]               = "✅ GANANCIA" if en_dinero else "❌ PERDIDA"
+        r["ganancia_opcion_pct"]     = variacion_real
+        r["ganancia_spy_pct"]        = ganancia_spy
+        r["fecha_evaluacion"]        = str(hoy)
+        evaluados += 1
+
+    return evaluados
+
+
+def construir_seccion_track_record(registros):
+    """Construye la seccion HTML del track record para el email."""
+    cerrados = [r for r in registros if r["estado"] in ("ganancia", "perdida")]
+    pendientes = [r for r in registros if r["estado"] == "pendiente"]
+
+    if not cerrados and not pendientes:
+        return ""
+
+    # Estadisticas globales
+    ganancias  = [r for r in cerrados if r["estado"] == "ganancia"]
+    perdidas   = [r for r in cerrados if r["estado"] == "perdida"]
+    total_c    = len(cerrados)
+    pct_acierto = round(len(ganancias) / total_c * 100) if total_c > 0 else 0
+
+    # Comparativa vs SPY
+    gan_med_op  = round(sum(r["ganancia_opcion_pct"] or 0 for r in ganancias) / len(ganancias), 1) if ganancias else 0
+    spy_med     = round(sum(r["ganancia_spy_pct"] or 0 for r in cerrados) / total_c, 1) if total_c > 0 else 0
+
+    color_acierto = "#1a7f37" if pct_acierto >= 50 else "#cf222e"
+
+    html = [f"""
+    <div style="margin-top:30px;border:2px solid #1a1a2e;border-radius:10px;overflow:hidden">
+        <div style="background:#1a1a2e;color:white;padding:14px 18px">
+            <h2 style="margin:0;font-size:17px">📈 Track Record — Historial de señales</h2>
+            <p style="margin:4px 0 0 0;opacity:0.8;font-size:12px">Seguimiento automatico de todas las recomendaciones anteriores</p>
+        </div>
+        <div style="padding:16px 18px">
+    """]
+
+    # Resumen
+    if total_c > 0:
+        html.append(f"""
+        <table style="width:100%;border-collapse:collapse;margin-bottom:20px">
+            <tr>
+                <td style="background:#f0f4ff;padding:12px;border-radius:8px;text-align:center;width:22%">
+                    <div style="font-size:26px;font-weight:bold;color:{color_acierto}">{pct_acierto}%</div>
+                    <div style="font-size:11px;color:#666">tasa de acierto</div>
+                </td>
+                <td style="width:3%"></td>
+                <td style="background:#f0fff4;padding:12px;border-radius:8px;text-align:center;width:22%">
+                    <div style="font-size:26px;font-weight:bold;color:#1a7f37">{len(ganancias)}</div>
+                    <div style="font-size:11px;color:#666">señales acertadas</div>
+                </td>
+                <td style="width:3%"></td>
+                <td style="background:#fff0f0;padding:12px;border-radius:8px;text-align:center;width:22%">
+                    <div style="font-size:26px;font-weight:bold;color:#cf222e">{len(perdidas)}</div>
+                    <div style="font-size:11px;color:#666">señales fallidas</div>
+                </td>
+                <td style="width:3%"></td>
+                <td style="background:#fffbe6;padding:12px;border-radius:8px;text-align:center;width:22%">
+                    <div style="font-size:14px;font-weight:bold;color:#9a6700">
+                        Señales: {gan_med_op:+.1f}%<br>SPY: {spy_med:+.1f}%
+                    </div>
+                    <div style="font-size:11px;color:#666">variacion media</div>
+                </td>
+            </tr>
+        </table>
+        """)
+
+    # Señales pendientes (aun no vencidas)
+    if pendientes:
+        pendientes_ordenados = sorted(pendientes, key=lambda x: x["vencimiento"])
+        html.append(f"""
+        <h4 style="margin:0 0 8px 0;color:#555">⏳ Señales en curso ({len(pendientes)})</h4>
+        <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:16px">
+        <tr style="background:#e8eaf6">
+            <th style="padding:6px;text-align:left">Empresa</th>
+            <th style="padding:6px">Tipo</th>
+            <th style="padding:6px">Strike</th>
+            <th style="padding:6px">Precio señal</th>
+            <th style="padding:6px">Vence</th>
+            <th style="padding:6px">Necesita</th>
+        </tr>
+        """)
+        for r in pendientes_ordenados[:10]:
+            dias = (datetime.strptime(r["vencimiento"], "%Y-%m-%d").date() - date.today()).days
+            color_tipo = "#1a7f37" if r["tipo"] == "CALL" else "#cf222e"
+            html.append(f"""
+            <tr style="border-bottom:1px solid #eee">
+                <td style="padding:6px"><b>{r['ticker']}</b></td>
+                <td style="padding:6px;text-align:center;color:{color_tipo};font-weight:bold">{r['tipo']}</td>
+                <td style="padding:6px;text-align:center">${r['strike']}</td>
+                <td style="padding:6px;text-align:center">${r['precio_accion_señal']}</td>
+                <td style="padding:6px;text-align:center">{r['vencimiento']}<br><span style="color:#888;font-size:10px">{dias} dias</span></td>
+                <td style="padding:6px;text-align:center">
+                    {'subir' if r['tipo'] == 'CALL' else 'bajar'} {r['variacion_necesaria_pct']}%
+                </td>
+            </tr>""")
+        html.append("</table>")
+
+    # Historial de señales cerradas
+    if cerrados:
+        cerrados_ordenados = sorted(cerrados, key=lambda x: x.get("fecha_evaluacion",""), reverse=True)
+        html.append(f"""
+        <h4 style="margin:16px 0 8px 0;color:#555">📋 Historial de señales vencidas ({total_c})</h4>
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+        <tr style="background:#f0f0f0">
+            <th style="padding:6px;text-align:left">Empresa</th>
+            <th style="padding:6px">Tipo</th>
+            <th style="padding:6px">Strike</th>
+            <th style="padding:6px">Precio entrada</th>
+            <th style="padding:6px">Precio venc.</th>
+            <th style="padding:6px">Resultado</th>
+            <th style="padding:6px">Accion</th>
+            <th style="padding:6px">vs SPY</th>
+        </tr>
+        """)
+        for r in cerrados_ordenados[:20]:
+            bg = "#f0fff4" if r["estado"] == "ganancia" else "#fff0f0"
+            gan_color = "#1a7f37" if r["estado"] == "ganancia" else "#cf222e"
+            spy_color = "#1a7f37" if (r.get("ganancia_spy_pct") or 0) > 0 else "#cf222e"
+            html.append(f"""
+            <tr style="background:{bg};border-bottom:1px solid #eee">
+                <td style="padding:6px"><b>{r['ticker']}</b><br><span style="font-size:10px;color:#888">{r['fecha_señal']}</span></td>
+                <td style="padding:6px;text-align:center;color:{'#1a7f37' if r['tipo']=='CALL' else '#cf222e'};font-weight:bold">{r['tipo']}</td>
+                <td style="padding:6px;text-align:center">${r['strike']}</td>
+                <td style="padding:6px;text-align:center">${r['precio_accion_señal']}</td>
+                <td style="padding:6px;text-align:center">${r.get('precio_accion_vencimiento','—')}</td>
+                <td style="padding:6px;text-align:center;font-weight:bold;color:{gan_color}">{r.get('resultado','—')}</td>
+                <td style="padding:6px;text-align:center;color:{gan_color}">{r.get('ganancia_opcion_pct',0):+.1f}%</td>
+                <td style="padding:6px;text-align:center;color:{spy_color}">{r.get('ganancia_spy_pct',0):+.1f}%</td>
+            </tr>""")
+        html.append("</table>")
+        html.append("""
+        <p style="font-size:11px;color:#888;margin-top:8px">
+            * "Accion" muestra la variacion del precio de la accion entre la señal y el vencimiento.<br>
+            * "vs SPY" muestra lo que habria ganado el S&P500 en ese mismo periodo como referencia.<br>
+            * El resultado se calcula si la opcion habria terminado en dinero (in-the-money) al vencimiento.
+        </p>
+        """)
+
+    html.append("</div></div>")
+    return "\n".join(html)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
     total = len(TODOS_TICKERS)
     print(f"Analizando {total} empresas...\n")
 
-    todas    = []
+    todas     = []
     ratios_pc = {}
 
     for i, (ticker, nombre) in enumerate(TODOS_TICKERS.items(), 1):
@@ -421,8 +688,21 @@ def main():
     puts  = [a for a in todas if a["tipo"] == "PUT"]
     print(f"\n\nResultados: {len(calls)} calls · {len(puts)} puts · {len(todas)} total")
 
-    cuerpo = construir_email(todas, ratios_pc)
-    enviar_email(cuerpo, len(todas))
+    # ── Track record ──
+    print("Actualizando track record...")
+    registros   = cargar_track_record()
+    nuevos      = registrar_nuevas_señales(todas, registros)
+    evaluados   = evaluar_señales_vencidas(registros)
+    guardar_track_record(registros)
+    print(f"  Señales nuevas guardadas: {nuevos}")
+    print(f"  Señales evaluadas hoy:    {evaluados}")
+
+    # ── Email ──
+    cuerpo           = construir_email(todas, ratios_pc)
+    seccion_track    = construir_seccion_track_record(registros)
+    cuerpo_final     = cuerpo.replace("<!-- TRACK_RECORD_PLACEHOLDER -->", seccion_track)
+
+    enviar_email(cuerpo_final, len(todas))
 
 
 if __name__ == "__main__":

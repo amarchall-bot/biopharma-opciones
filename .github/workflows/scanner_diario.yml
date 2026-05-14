@@ -2,15 +2,15 @@ name: Scanner Opciones Biopharma
 
 on:
   schedule:
-    # 8:30am hora española (UTC+2 verano / UTC+1 invierno)
-    # Usamos 6:30 UTC (verano CEST). Ajustar a 7:30 en invierno.
-    - cron: '30 6 * * 1-5'
-  workflow_dispatch:  # permite ejecutarlo manualmente desde GitHub
+    - cron: '30 6 * * 1-5'   # 8:30am hora española (verano UTC+2)
+  workflow_dispatch:
 
 jobs:
   enviar-radar:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+    permissions:
+      contents: write   # necesario para hacer commit del track record
 
     steps:
       - name: Descargar codigo
@@ -29,4 +29,13 @@ jobs:
         env:
           EMAIL_ORIGEN: ${{ secrets.EMAIL_ORIGEN }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          TRADIER_TOKEN: ${{ secrets.TRADIER_TOKEN }}
         run: python opciones_biopharma.py
+
+      - name: Guardar track record en el repositorio
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add track_record.json
+          git diff --staged --quiet || git commit -m "Track record actualizado $(date +'%Y-%m-%d')"
+          git push
