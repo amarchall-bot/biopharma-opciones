@@ -262,9 +262,10 @@ def construir_email(todas_anomalias, ratios_pc):
 
     html = [f"""
     <div style="font-family:Arial,sans-serif;max-width:680px;margin:auto;color:#1a1a1a">
-    <div style="background:#1a1a2e;color:white;padding:20px;border-radius:10px;margin-bottom:20px">
-        <h1 style="margin:0;font-size:22px">📊 Radar de Opciones Inusuales</h1>
-        <p style="margin:6px 0 0 0;opacity:0.8">{hoy} · {len(todas_anomalias)} señales detectadas hoy</p>
+    <div style="background:#1a1a2e;color:white;padding:24px;border-radius:10px;margin-bottom:20px">
+        <div style="font-size:11px;letter-spacing:3px;text-transform:uppercase;opacity:0.5;margin-bottom:6px">HookFlow</div>
+        <h1 style="margin:0;font-size:22px;font-weight:800">Catch the smart money before the move happens.</h1>
+        <p style="margin:8px 0 0 0;opacity:0.6;font-size:12px">{hoy} · {len(todas_anomalias)} señales detectadas · Biopharma Options Scanner</p>
     </div>
     <table style="width:100%;border-collapse:collapse;margin-bottom:24px">
         <tr>
@@ -286,34 +287,7 @@ def construir_email(todas_anomalias, ratios_pc):
     </table>
     """]
 
-    # ── Seccion ratio Put/Call ──
-    ratios_interesantes = {t: r for t, r in ratios_pc.items() if r is not None and (r >= 2.0 or r <= 0.5)}
-    if ratios_interesantes:
-        html.append("""
-        <div style="background:#f0f4ff;border-radius:8px;padding:16px;margin-bottom:20px">
-        <h3 style="margin:0 0 10px 0;font-size:15px">📊 Ratio Put/Call destacado — presion sostenida</h3>
-        <p style="font-size:12px;color:#555;margin:0 0 10px 0">
-            Un ratio alto (>2) indica mucha mas apuesta bajista que alcista. Un ratio bajo (&lt;0.5) indica presion alcista fuerte.
-        </p>
-        <table style="width:100%;border-collapse:collapse;font-size:13px">
-        <tr style="background:#dce8ff"><th style="padding:6px">Empresa</th><th style="padding:6px">Ratio Put/Call</th><th style="padding:6px">Señal</th></tr>
-        """)
-        for ticker, ratio in sorted(ratios_interesantes.items(), key=lambda x: x[1], reverse=True):
-            nombre = TODOS_TICKERS.get(ticker, ticker)
-            if ratio >= 2.0:
-                señal = "⚠️ Presion bajista fuerte"
-                color = "#cf222e"
-            else:
-                señal = "✅ Presion alcista fuerte"
-                color = "#1a7f37"
-            html.append(f"""
-            <tr><td style="padding:6px"><b>{ticker}</b> — {nombre}</td>
-            <td style="padding:6px;text-align:center;font-weight:bold;color:{color}">{ratio}</td>
-            <td style="padding:6px">{señal}</td></tr>
-            """)
-        html.append("</table></div>")
-
-    # ── Señales individuales ──
+    # ── Señales individuales — PRIMERO ──
     if not todas_anomalias:
         html.append("""
         <div style="background:#f6f8fa;border-radius:8px;padding:24px;text-align:center;color:#666">
@@ -371,6 +345,33 @@ def construir_email(todas_anomalias, ratios_pc):
             </div>
         </div>""")
 
+    # ── Ratio Put/Call — despues de las señales ──
+    ratios_interesantes = {t: r for t, r in ratios_pc.items() if r is not None and (r >= 2.0 or r <= 0.5)}
+    if ratios_interesantes:
+        html.append("""
+        <div style="background:#f0f4ff;border-radius:8px;padding:16px;margin-bottom:20px">
+        <h3 style="margin:0 0 10px 0;font-size:15px">📊 Ratio Put/Call destacado — presion sostenida</h3>
+        <p style="font-size:12px;color:#555;margin:0 0 10px 0">
+            Un ratio alto (&gt;2) indica mucha mas apuesta bajista que alcista. Un ratio bajo (&lt;0.5) indica presion alcista fuerte.
+        </p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+        <tr style="background:#dce8ff"><th style="padding:6px">Empresa</th><th style="padding:6px">Ratio Put/Call</th><th style="padding:6px">Señal</th></tr>
+        """)
+        for ticker, ratio in sorted(ratios_interesantes.items(), key=lambda x: x[1], reverse=True):
+            nombre = TODOS_TICKERS.get(ticker, ticker)
+            if ratio >= 2.0:
+                señal = "⚠️ Presion bajista fuerte"
+                color = "#cf222e"
+            else:
+                señal = "✅ Presion alcista fuerte"
+                color = "#1a7f37"
+            html.append(f"""
+            <tr><td style="padding:6px"><b>{ticker}</b> — {nombre}</td>
+            <td style="padding:6px;text-align:center;font-weight:bold;color:{color}">{ratio}</td>
+            <td style="padding:6px">{señal}</td></tr>
+            """)
+        html.append("</table></div>")
+
     # Track record (se pasa como parametro)
     html.append("<!-- TRACK_RECORD_PLACEHOLDER -->")
 
@@ -390,8 +391,8 @@ def enviar_email(cuerpo_html, n_anomalias):
         print("ERROR: faltan credenciales de email.")
         return False
 
-    asunto = f"Radar Opciones — {n_anomalias} señales detectadas — {datetime.now().strftime('%d/%m/%Y')}" \
-             if n_anomalias > 0 else f"Radar Opciones — Sin actividad inusual hoy — {datetime.now().strftime('%d/%m/%Y')}"
+    asunto = f"HookFlow — {n_anomalias} señales detectadas — {datetime.now().strftime('%d/%m/%Y')}" \
+             if n_anomalias > 0 else f"HookFlow — Sin actividad inusual hoy — {datetime.now().strftime('%d/%m/%Y')}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = asunto
@@ -535,7 +536,9 @@ def evaluar_señales_vencidas(registros):
     return evaluados
 
 
-def construir_seccion_track_record(registros):
+def construir_seccion_track_record(registros, todos_registros=None):
+    if todos_registros is None:
+        todos_registros = registros
     """Construye la seccion HTML del track record para el email."""
     cerrados = [r for r in registros if r["estado"] in ("ganancia", "perdida")]
     pendientes = [r for r in registros if r["estado"] == "pendiente"]
@@ -555,12 +558,24 @@ def construir_seccion_track_record(registros):
 
     color_acierto = "#1a7f37" if pct_acierto >= 50 else "#cf222e"
 
+    # Comprobar si hay datos simulados (fechas anteriores al primer dia real)
+    tiene_simulados = any(r.get("fecha_señal","") < "2026-05-14" for r in registros)
+
+    aviso_simulacion = ""
+    if tiene_simulados:
+        aviso_simulacion = """
+        <div style="background:#fff8e1;border-bottom:1px solid #ffe082;padding:10px 18px;font-size:12px;color:#7a5100">
+            &#9888;&#65039; <b>Datos de ejemplo &mdash; SIMULACION.</b> Las señales anteriores al 14/05/2026 son ilustrativas
+            y no corresponden a detecciones reales. El track record real comenzara a acumularse desde hoy.
+        </div>"""
+
     html = [f"""
     <div style="margin-top:30px;border:2px solid #1a1a2e;border-radius:10px;overflow:hidden">
         <div style="background:#1a1a2e;color:white;padding:14px 18px">
-            <h2 style="margin:0;font-size:17px">📈 Track Record — Historial de señales</h2>
+            <h2 style="margin:0;font-size:17px">&#128200; Track Record &mdash; Historial de señales</h2>
             <p style="margin:4px 0 0 0;opacity:0.8;font-size:12px">Seguimiento automatico de todas las recomendaciones anteriores</p>
         </div>
+        {aviso_simulacion}
         <div style="padding:16px 18px">
     """]
 
@@ -699,7 +714,7 @@ def main():
 
     # ── Email ──
     cuerpo           = construir_email(todas, ratios_pc)
-    seccion_track    = construir_seccion_track_record(registros)
+    seccion_track    = construir_seccion_track_record(registros, todos_registros=registros)
     cuerpo_final     = cuerpo.replace("<!-- TRACK_RECORD_PLACEHOLDER -->", seccion_track)
 
     enviar_email(cuerpo_final, len(todas))
