@@ -72,7 +72,7 @@ MIN_VOLUMEN       = 200
 MIN_OPEN_INTEREST = 50
 MAX_VENCIMIENTOS  = 3
 
-DESTINATARIO   = "amarchall@gmail.com"
+DESTINATARIOS  = ["amarchall@gmail.com", "cmarchal@marchalconsultores.com"]
 EMAIL_ORIGEN   = os.environ.get("EMAIL_ORIGEN", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 TRADIER_TOKEN  = os.environ.get("TRADIER_TOKEN", "")
@@ -738,14 +738,14 @@ def enviar_email(cuerpo_html, n_anomalias):
     msg = MIMEMultipart("alternative")
     msg["Subject"] = asunto
     msg["From"]    = EMAIL_ORIGEN
-    msg["To"]      = DESTINATARIO
+    msg["To"]      = ", ".join(DESTINATARIOS)
     msg.attach(MIMEText(cuerpo_html, "html"))
 
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
             server.login(EMAIL_ORIGEN, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_ORIGEN, DESTINATARIO, msg.as_string())
-        print(f"✅ Email enviado a {DESTINATARIO}")
+            server.sendmail(EMAIL_ORIGEN, DESTINATARIOS, msg.as_string())
+        print(f"✅ Email enviado a {', '.join(DESTINATARIOS)}")
         return True
     except Exception as e:
         print(f"❌ Error: {e}")
