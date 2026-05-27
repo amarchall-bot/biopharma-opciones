@@ -301,71 +301,124 @@ def generar_consejo(a):
 
     try:
         dias_restantes = (datetime.strptime(venc, "%Y-%m-%d").date() - date.today()).days
-        venc_legible   = datetime.strptime(venc, "%Y-%m-%d").strftime("%d de %B de %Y")
+        venc_legible   = datetime.strptime(venc, "%Y-%m-%d").strftime("%d/%m/%Y")
+        venc_largo     = datetime.strptime(venc, "%Y-%m-%d").strftime("%d de %B de %Y")
     except Exception:
         dias_restantes = 30
         venc_legible   = venc
+        venc_largo     = venc
 
+    # Plazo
     if dias_restantes <= 14:
-        urgencia = "🔴 Apuesta a MUY CORTO PLAZO"
-        urgencia_texto = f"solo quedan <b>{dias_restantes} dias</b> — alguien espera un movimiento muy rapido"
-    elif dias_restantes <= 45:
-        urgencia = "🟡 Apuesta a CORTO PLAZO"
-        urgencia_texto = f"quedan <b>{dias_restantes} dias</b> hasta el vencimiento"
+        plazo_badge = f"🔴 {dias_restantes} dias"
+        plazo_color = "#cf222e"
+    elif dias_restantes <= 30:
+        plazo_badge = f"🟠 {dias_restantes} dias"
+        plazo_color = "#e36700"
     else:
-        urgencia = "🟢 Apuesta a MEDIO PLAZO"
-        urgencia_texto = f"quedan <b>{dias_restantes} dias</b> hasta el vencimiento"
+        plazo_badge = f"🟢 {dias_restantes} dias"
+        plazo_color = "#1a7f37"
 
-    coste_aprox = f"~${round(precio_op * 100, 0):,.0f} por contrato" if precio_op > 0 else "consulta el precio en tu broker"
+    # Coste y escenarios con referencia de 500$
+    coste_contrato = round(precio_op * 100, 0) if precio_op > 0 else None
+    coste_txt = f"~${coste_contrato:,.0f}" if coste_contrato else "ver en broker"
+
+    if coste_contrato and coste_contrato > 0:
+        contratos_500 = max(1, int(500 / coste_contrato))
+        inversion_ref = round(contratos_500 * coste_contrato)
+        # Estimacion de ganancia potencial (opciones OTM tipicamente 3x-8x si aciertan)
+        multiplicador = 5 if otm else 2
+        ganancia_est  = round(inversion_ref * multiplicador)
+        escenario_ganar = f"Con ~${inversion_ref} ({contratos_500} contrato{'s' if contratos_500 > 1 else ''}) podrias ganar ~${ganancia_est}"
+        escenario_perder = f"Si no funciona: pierdes los ~${inversion_ref} invertidos (maximo)"
+    else:
+        escenario_ganar  = "Ganancia potencial: multiplica varias veces lo invertido"
+        escenario_perder = "Riesgo maximo: perder toda la prima pagada"
+
+    # Stop-loss sugerido para acciones
+    stop_loss = round(precio * 0.95, 2)
+    stop_loss_pct = 5.0
 
     if tipo == "CALL":
-        if otm:
-            explicacion = (f"Alguien ha apostado fuerte a que <b>{nombre} ({ticker})</b> va a subir un <b>{var_pct}%</b> "
-                           f"en los proximos {dias_restantes} dias. Ahora cotiza a <b>${precio}</b> y la apuesta es que "
-                           f"llegue a <b>${strike}</b> antes del {venc_legible}. "
-                           f"Es una apuesta <b>agresiva</b> ({volumen:,} contratos, {ratio}x la actividad normal). {urgencia_texto.capitalize()}.")
-        else:
-            explicacion = (f"Alguien apuesta a que <b>{nombre} ({ticker})</b> va a mantenerse por encima de <b>${strike}</b> "
-                           f"(ahora cotiza a <b>${precio}</b>). Con {volumen:,} contratos y ratio {ratio}x. {urgencia_texto.capitalize()}.")
-        operacion_1  = f"Comprar un CALL de <b>{ticker}</b> con strike <b>${strike}</b> y vencimiento <b>{venc_legible}</b>"
-        operacion_2  = f"Comprar acciones de <b>{ticker}</b> directamente a precio de mercado (~${precio})"
-        ganancia_op1 = f"Si {ticker} llega a ${strike}, la opcion podria multiplicar su valor varias veces"
-        ganancia_op2 = "Ganas proporcionalmente si la accion sube"
-        riesgo_op1   = f"Pierdes todo lo invertido si la accion no llega a ${strike} antes del vencimiento"
-        riesgo_op2   = "Solo pierdes si la accion baja de precio"
-        color_titulo = "#1a7f37"
+        color_tipo   = "#1a7f37"
+        bg_tipo      = "#f0fff4"
         emoji_tipo   = "📈 SEÑAL ALCISTA"
-    else:
+        resumen_1lin = f"Alguien aposto {ratio}x lo normal a que {ticker} SUBE a ${strike} antes del {venc_legible}"
         if otm:
-            explicacion = (f"Alguien ha apostado fuerte a que <b>{nombre} ({ticker})</b> va a CAER un <b>{var_pct}%</b> "
-                           f"en los proximos {dias_restantes} dias. Ahora cotiza a <b>${precio}</b> y la apuesta es que "
-                           f"baje a <b>${strike}</b> antes del {venc_legible}. "
-                           f"Con {volumen:,} contratos y ratio {ratio}x. {urgencia_texto.capitalize()}.")
+            contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
+                        f"Alguien con mucho dinero apuesta a que <b>{nombre}</b> va a subir un <b>{var_pct}%</b> "
+                        f"en los proximos {dias_restantes} dias, pasando de <b>${precio}</b> a <b>${strike}</b>. "
+                        f"Este tipo de volumen inusual suele indicar que alguien sabe algo.")
         else:
-            explicacion = (f"Alguien apuesta a que <b>{nombre} ({ticker})</b> va a CAER por debajo de <b>${strike}</b> "
-                           f"(ahora cotiza a <b>${precio}</b>). Con {volumen:,} contratos y ratio {ratio}x. {urgencia_texto.capitalize()}.")
-        operacion_1  = f"Comprar un PUT de <b>{ticker}</b> con strike <b>${strike}</b> y vencimiento <b>{venc_legible}</b>"
-        operacion_2  = f"Si tienes acciones de <b>{ticker}</b>, considera poner un stop-loss en ~${round(precio * 0.95, 2)}"
-        ganancia_op1 = f"Si {ticker} cae a ${strike}, la opcion podria multiplicar su valor"
-        ganancia_op2 = "Proteges tu cartera si tienes esa accion"
-        riesgo_op1   = "Pierdes la prima si la accion no cae lo suficiente"
-        riesgo_op2   = "Si no tienes la accion, esta opcion no aplica directamente"
-        color_titulo = "#cf222e"
-        emoji_tipo   = "📉 SEÑAL BAJISTA"
-
-    if otm and dias_restantes <= 14:
-        nivel_riesgo = "🔴 MUY ALTO — opcion agresiva con poco tiempo"
-    elif otm:
-        nivel_riesgo = "🟠 ALTO — apuesta especulativa"
-    elif dias_restantes <= 14:
-        nivel_riesgo = "🟡 MEDIO-ALTO — poco tiempo pero precio razonable"
+            contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
+                        f"La apuesta es que <b>{nombre}</b> se mantendra por encima de <b>${strike}</b> "
+                        f"(ahora cotiza a <b>${precio}</b>) durante los proximos {dias_restantes} dias.")
+        paso2 = f"Busca <b>{ticker}</b> → sección <b>Opciones</b>"
+        paso3 = f"Selecciona vencimiento: <b>{venc_largo}</b>"
+        paso4 = f"Compra <b>CALL</b> con strike <b>${strike}</b>"
+        accion_conservadora = f"Compra acciones de <b>{ticker}</b> a precio de mercado (~${precio})"
+        ganancia_conservadora = f"Si {ticker} sube a ${strike}: ganas un <b>+{var_pct}%</b> por accion"
+        riesgo_conservadora = f"Pon un <b>stop-loss en ${stop_loss}</b> (-{stop_loss_pct}%) para limitar perdidas si baja"
+        nivel_conviccion = "alta" if ratio >= 10 else ("media" if ratio >= 7 else "moderada")
     else:
-        nivel_riesgo = "🟡 MEDIO — opcion mas conservadora"
+        color_tipo   = "#cf222e"
+        bg_tipo      = "#fff0f0"
+        emoji_tipo   = "📉 SEÑAL BAJISTA"
+        resumen_1lin = f"Alguien aposto {ratio}x lo normal a que {ticker} BAJA a ${strike} antes del {venc_legible}"
+        if otm:
+            contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
+                        f"Alguien con mucho dinero apuesta a que <b>{nombre}</b> va a caer un <b>{var_pct}%</b> "
+                        f"en los proximos {dias_restantes} dias, bajando de <b>${precio}</b> a <b>${strike}</b>. "
+                        f"Este tipo de volumen inusual suele indicar que alguien sabe algo.")
+        else:
+            contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
+                        f"La apuesta es que <b>{nombre}</b> va a caer por debajo de <b>${strike}</b> "
+                        f"(ahora cotiza a <b>${precio}</b>) en los proximos {dias_restantes} dias.")
+        paso2 = f"Busca <b>{ticker}</b> → sección <b>Opciones</b>"
+        paso3 = f"Selecciona vencimiento: <b>{venc_largo}</b>"
+        paso4 = f"Compra <b>PUT</b> con strike <b>${strike}</b>"
+        accion_conservadora = f"Si tienes acciones de <b>{ticker}</b>, pon un stop-loss ahora"
+        ganancia_conservadora = f"Proteges tu cartera si {ticker} cae hacia ${strike}"
+        riesgo_conservadora = f"Stop-loss sugerido: <b>${stop_loss}</b> (-{stop_loss_pct}% desde precio actual)"
+        nivel_conviccion = "alta" if ratio >= 10 else ("media" if ratio >= 7 else "moderada")
 
-    return dict(emoji_tipo=emoji_tipo, color_titulo=color_titulo, urgencia=urgencia,
-                explicacion=explicacion, operacion_1=operacion_1, coste_aprox=coste_aprox,
-                ganancia_op1=ganancia_op1, riesgo_op1=riesgo_op1, operacion_2=operacion_2,
-                ganancia_op2=ganancia_op2, riesgo_op2=riesgo_op2, nivel_riesgo=nivel_riesgo)
+    # Nivel de riesgo
+    if otm and dias_restantes <= 14:
+        riesgo_color = "#cf222e"
+        riesgo_label = "MUY ALTO"
+        riesgo_desc  = "Opcion agresiva con poco tiempo — solo si asumes perder lo invertido"
+        riesgo_barra = 4
+    elif otm:
+        riesgo_color = "#e36700"
+        riesgo_label = "ALTO"
+        riesgo_desc  = "Apuesta especulativa — posible ganancia alta, posible perdida total"
+        riesgo_barra = 3
+    elif dias_restantes <= 14:
+        riesgo_color = "#9a6700"
+        riesgo_label = "MEDIO-ALTO"
+        riesgo_desc  = "Poco tiempo pero precio mas accesible"
+        riesgo_barra = 2
+    else:
+        riesgo_color = "#9a6700"
+        riesgo_label = "MEDIO"
+        riesgo_desc  = "Opcion con mas margen de tiempo"
+        riesgo_barra = 2
+
+    return dict(
+        emoji_tipo=emoji_tipo, color_tipo=color_tipo, bg_tipo=bg_tipo,
+        plazo_badge=plazo_badge, plazo_color=plazo_color,
+        resumen_1lin=resumen_1lin, contexto=contexto,
+        coste_txt=coste_txt, coste_contrato=coste_contrato,
+        paso2=paso2, paso3=paso3, paso4=paso4,
+        escenario_ganar=escenario_ganar, escenario_perder=escenario_perder,
+        accion_conservadora=accion_conservadora,
+        ganancia_conservadora=ganancia_conservadora,
+        riesgo_conservadora=riesgo_conservadora,
+        nivel_conviccion=nivel_conviccion,
+        riesgo_color=riesgo_color, riesgo_label=riesgo_label,
+        riesgo_desc=riesgo_desc, riesgo_barra=riesgo_barra,
+        venc_largo=venc_largo,
+    )
 
 
 # ─── CALENDARIO FDA (PDUFA) ──────────────────────────────────────────────────
@@ -644,6 +697,21 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
     </table>
     """]
 
+    # ── Resumen ejecutivo (todas las señales en una línea) ──
+    if todas_anomalias:
+        html.append("""
+        <div style="background:#f6f8fa;border:1px solid #ddd;border-radius:10px;padding:14px 18px;margin-bottom:24px">
+            <div style="font-weight:800;font-size:13px;margin-bottom:10px;color:#1a1a2e">⚡ RESUMEN DE HOY</div>
+        """)
+        for a in calls + puts:
+            c = generar_consejo(a)
+            dot = "🟢" if a["tipo"] == "CALL" else "🔴"
+            html.append(f"""
+            <div style="font-size:13px;padding:5px 0;border-bottom:1px solid #eee;color:#333">
+                {dot} <b>{a['ticker']}</b> — {c['resumen_1lin']}
+            </div>""")
+        html.append("</div>")
+
     # ── Señales individuales — PRIMERO ──
     if not todas_anomalias:
         html.append("""
@@ -652,53 +720,112 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
             <p><b>Hoy no hay actividad inusual.</b><br>El mercado esta tranquilo en las empresas vigiladas.</p>
         </div>""")
     else:
-        for a in calls + puts:
+        for idx, a in enumerate(calls + puts, 1):
             c = generar_consejo(a)
-            otm_badge = '<span style="background:#ff9800;color:white;font-size:11px;padding:2px 6px;border-radius:4px;margin-left:6px">FUERA DEL PRECIO</span>' if a["otm"] else ""
+            otm_txt = ' &nbsp;<span style="background:#e36700;color:white;font-size:10px;padding:2px 7px;border-radius:3px;font-weight:700">OTM</span>' if a["otm"] else ""
+            barra_riesgo = "●" * c['riesgo_barra'] + "○" * (4 - c['riesgo_barra'])
+
             html.append(f"""
-        <div style="border:2px solid {c['color_titulo']};border-radius:10px;margin-bottom:24px;overflow:hidden">
-            <div style="background:{c['color_titulo']};color:white;padding:14px 18px">
-                <div style="font-size:18px;font-weight:bold">{c['emoji_tipo']} — {a['nombre']} ({a['ticker']}){otm_badge}</div>
-                <div style="opacity:0.9;font-size:13px;margin-top:4px">{c['urgencia']} &nbsp;·&nbsp; Score: {a['score']} &nbsp;·&nbsp; Ratio: {a['ratio']}x lo normal</div>
-            </div>
-            <div style="padding:16px 18px">
-                <div style="background:#f6f8fa;border-radius:6px;padding:12px;margin-bottom:14px">
-                    <div style="font-weight:bold;margin-bottom:6px">🔍 ¿Que esta pasando?</div>
-                    <div style="font-size:14px;line-height:1.6">{c['explicacion']}</div>
+        <div style="border:1px solid #ddd;border-radius:12px;margin-bottom:28px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.07)">
+
+            <!-- CABECERA -->
+            <div style="background:{c['color_tipo']};color:white;padding:16px 20px">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+                    <div>
+                        <div style="font-size:11px;letter-spacing:2px;opacity:0.8;margin-bottom:4px">{c['emoji_tipo']}</div>
+                        <div style="font-size:20px;font-weight:800">{a['nombre']} ({a['ticker']}){otm_txt}</div>
+                    </div>
+                    <div style="text-align:right">
+                        <div style="background:rgba(255,255,255,0.2);border-radius:6px;padding:6px 12px;font-size:12px">
+                            Conviccion {c['nivel_conviccion']}<br>
+                            <b style="font-size:16px">{a['ratio']}x</b> lo normal
+                        </div>
+                    </div>
                 </div>
-                <table style="width:100%;border-collapse:collapse;margin-bottom:14px;font-size:13px">
-                    <tr style="background:#f0f0f0">
-                        <td style="padding:6px 10px"><b>Precio actual</b></td>
-                        <td style="padding:6px 10px"><b>Strike (objetivo)</b></td>
-                        <td style="padding:6px 10px"><b>Vence el</b></td>
-                        <td style="padding:6px 10px"><b>Contratos apostados</b></td>
-                    </tr>
+                <div style="margin-top:10px;font-size:12px;opacity:0.85;background:rgba(0,0,0,0.15);border-radius:6px;padding:8px 12px">
+                    {c['contexto']}
+                </div>
+            </div>
+
+            <div style="padding:18px 20px">
+
+                <!-- NUMEROS CLAVE -->
+                <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px">
                     <tr>
-                        <td style="padding:8px 10px;font-size:16px"><b>${a['precio_actual']}</b></td>
-                        <td style="padding:8px 10px;font-size:16px"><b>${a['strike']}</b></td>
-                        <td style="padding:8px 10px">{a['vencimiento']}</td>
-                        <td style="padding:8px 10px"><b>{a['volumen']:,}</b> contratos</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Precio hoy</div>
+                            <div style="font-size:18px;font-weight:800;color:#1a1a1a">${a['precio_actual']}</div>
+                        </td>
+                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">→</td>
+                        <td style="background:{c['bg_tipo']};border-radius:8px;padding:10px 12px;text-align:center;width:22%;border:2px solid {c['color_tipo']}22">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Objetivo</div>
+                            <div style="font-size:18px;font-weight:800;color:{c['color_tipo']}">${a['strike']}</div>
+                            <div style="font-size:10px;color:{c['color_tipo']}">{'+' if a['tipo']=='CALL' else '-'}{a['variacion_pct']}%</div>
+                        </td>
+                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Vence</div>
+                            <div style="font-size:13px;font-weight:700">{c['venc_largo']}</div>
+                            <div style="font-size:11px;color:{c['plazo_color']}">{c['plazo_badge']}</div>
+                        </td>
+                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Coste opcion</div>
+                            <div style="font-size:16px;font-weight:800">{c['coste_txt']}</div>
+                            <div style="font-size:10px;color:#888">por contrato (100 acc.)</div>
+                        </td>
                     </tr>
                 </table>
-                <div style="font-weight:bold;margin-bottom:10px">💡 ¿Que puedes hacer?</div>
-                <div style="border:1px solid #ddd;border-radius:6px;padding:12px;margin-bottom:10px">
-                    <div style="font-weight:bold;color:{c['color_titulo']};margin-bottom:6px">Opcion 1 — Seguir la apuesta (MAS AGRESIVO)</div>
-                    <div style="font-size:13px;line-height:1.7">
-                        👉 {c['operacion_1']}<br>
-                        💰 Coste aproximado: <b>{c['coste_aprox']}</b><br>
-                        ✅ Si funciona: {c['ganancia_op1']}<br>
-                        ❌ Si no funciona: {c['riesgo_op1']}
+
+                <!-- OPCION A: AGRESIVA -->
+                <div style="border:2px solid {c['color_tipo']}33;border-radius:8px;margin-bottom:12px;overflow:hidden">
+                    <div style="background:{c['bg_tipo']};padding:10px 14px;border-bottom:1px solid {c['color_tipo']}22">
+                        <span style="font-weight:800;color:{c['color_tipo']};font-size:14px">🎯 OPCION A — Seguir la apuesta</span>
+                        <span style="float:right;background:{c['color_tipo']};color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">MAS AGRESIVO</span>
+                    </div>
+                    <div style="padding:12px 14px">
+                        <div style="font-size:13px;color:#555;margin-bottom:10px">Pasos a seguir en tu broker:</div>
+                        <div style="font-size:13px;line-height:2">
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">1</span> Abre tu broker (Interactive Brokers, Degiro...)<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">2</span> {c['paso2']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">3</span> {c['paso3']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">4</span> {c['paso4']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">5</span> Coste: <b>{c['coste_txt']} por contrato</b> (cada contrato = 100 acciones)
+                        </div>
+                        <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+                            <div style="background:#f0fff4;border:1px solid #a8f0c0;border-radius:6px;padding:8px 12px;font-size:12px;flex:1">
+                                ✅ <b>Si funciona:</b><br>{c['escenario_ganar']}
+                            </div>
+                            <div style="background:#fff0f0;border:1px solid #f0a8a8;border-radius:6px;padding:8px 12px;font-size:12px;flex:1">
+                                ❌ <b>Si no funciona:</b><br>{c['escenario_perder']}
+                            </div>
+                        </div>
                     </div>
                 </div>
-                <div style="border:1px solid #ddd;border-radius:6px;padding:12px;margin-bottom:10px">
-                    <div style="font-weight:bold;color:#0066cc;margin-bottom:6px">Opcion 2 — Alternativa mas conservadora</div>
-                    <div style="font-size:13px;line-height:1.7">
-                        👉 {c['operacion_2']}<br>
-                        ✅ Si funciona: {c['ganancia_op2']}<br>
-                        ❌ Riesgo: {c['riesgo_op2']}
+
+                <!-- OPCION B: CONSERVADORA -->
+                <div style="border:1px solid #ddd;border-radius:8px;margin-bottom:14px;overflow:hidden">
+                    <div style="background:#f0f4ff;padding:10px 14px;border-bottom:1px solid #ddd">
+                        <span style="font-weight:800;color:#1a3a8f;font-size:14px">🔵 OPCION B — Version conservadora</span>
+                        <span style="float:right;background:#1a3a8f;color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">MENOS RIESGO</span>
+                    </div>
+                    <div style="padding:12px 14px;font-size:13px;line-height:1.8">
+                        👉 {c['accion_conservadora']}<br>
+                        ✅ {c['ganancia_conservadora']}<br>
+                        🛡️ {c['riesgo_conservadora']}
                     </div>
                 </div>
-                <div style="font-size:13px;color:#555">⚠️ <b>Nivel de riesgo:</b> {c['nivel_riesgo']}</div>
+
+                <!-- NIVEL DE RIESGO -->
+                <div style="background:#fafafa;border-radius:6px;padding:10px 14px;display:flex;align-items:center;gap:12px">
+                    <div>
+                        <span style="font-size:12px;color:#555">⚠️ Nivel de riesgo: </span>
+                        <span style="font-weight:800;color:{c['riesgo_color']}">{c['riesgo_label']}</span>
+                        <span style="font-size:11px;color:{c['riesgo_color']};margin-left:4px">{c['riesgo_barra'] * '●' + (4 - c['riesgo_barra']) * '○'}</span>
+                    </div>
+                    <div style="font-size:11px;color:#777;flex:1">{c['riesgo_desc']}</div>
+                </div>
+
             </div>
         </div>""")
 
