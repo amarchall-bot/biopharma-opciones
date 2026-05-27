@@ -71,7 +71,7 @@ UMBRAL_VOL_OI     = 5.0   # subido de 3x a 5x — más convicción institucional
 MIN_VOLUMEN       = 200
 MIN_OPEN_INTEREST = 50
 MAX_VENCIMIENTOS  = 3
-MIN_DIAS_VENCIMIENTO = 3   # ignorar opciones que vencen en menos de 3 días
+MIN_DIAS_VENCIMIENTO = 5   # ignorar opciones que vencen en menos de 5 días
 MAX_VARIACION_PCT    = 15.0  # ignorar apuestas que requieren >15% de movimiento
 MAX_SEÑALES_TICKER   = 2   # máximo 2 señales por empresa por día
 
