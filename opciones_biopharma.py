@@ -67,13 +67,14 @@ TODOS_TICKERS = {**BIOFARMACEUTICAS, **ESPAÑOLAS_EN_EEUU}
 
 # ─── PARAMETROS ───────────────────────────────────────────────────────────────
 
-UMBRAL_VOL_OI     = 5.0   # subido de 3x a 5x — más convicción institucional
-MIN_VOLUMEN       = 200
-MIN_OPEN_INTEREST = 50
-MAX_VENCIMIENTOS  = 3
-MIN_DIAS_VENCIMIENTO = 5   # ignorar opciones que vencen en menos de 5 días
-MAX_VARIACION_PCT    = 15.0  # ignorar apuestas que requieren >15% de movimiento
-MAX_SEÑALES_TICKER   = 2   # máximo 2 señales por empresa por día
+UMBRAL_VOL_OI        = 5.0    # ratio Vol/OI mínimo
+MIN_VOLUMEN          = 200
+MIN_OPEN_INTEREST    = 50
+MAX_VENCIMIENTOS     = 3
+MIN_DIAS_VENCIMIENTO = 5      # ignorar opciones con menos de 5 días
+MAX_VARIACION_PCT    = 15.0   # ignorar apuestas que requieren >15% de movimiento
+MAX_SEÑALES_TICKER   = 2      # máximo 2 señales por empresa por día
+MIN_PREMIUM_USD      = 25000  # mínimo $25.000 de prima total apostada — separa institucional de retail
 
 DESTINATARIOS  = ["amarchall@gmail.com", "cmarchal@marchalconsultores.com"]
 EMAIL_ORIGEN   = os.environ.get("EMAIL_ORIGEN", "")
@@ -89,12 +90,54 @@ TRADIER_BASE = "https://api.tradier.com/v1/markets"
 
 # ─── ANALISIS ─────────────────────────────────────────────────────────────────
 
-def score_anomalia(volume, ratio):
-    score = ratio
+def score_anomalia(volume, ratio, premium_usd=0, con_tendencia=False,
+                   multi_vencimiento=False, catalizado_fda=False):
+    """
+    Score profesional que pondera los factores más relevantes:
+    - Ratio Vol/OI: base (convicción inmediata)
+    - Premium $: cuánto dinero real se ha apostado
+    - Tendencia: ¿la acción ya va en esa dirección?
+    - Multi-vencimiento: ¿mismo ticker en 2+ fechas?
+    - FDA catalyst: ¿la opción vence justo después de un PDUFA?
+    """
+    score = ratio  # base
+
+    # Volumen
     if volume > 1000:  score += 1
     if volume > 5000:  score += 2
     if volume > 10000: score += 3
+
+    # Premium total apostado ($) — el filtro institucional más importante
+    if premium_usd >= 50_000:   score += 2
+    if premium_usd >= 100_000:  score += 3
+    if premium_usd >= 500_000:  score += 5
+
+    # Confirmaciones adicionales
+    if con_tendencia:      score += 2   # la acción ya va en la dirección de la apuesta
+    if multi_vencimiento:  score += 2   # mismo ticker en 2+ vencimientos = convicción
+    if catalizado_fda:     score += 5   # opción vence justo después de PDUFA date
+
     return round(score, 1)
+
+
+def obtener_tendencia(ticker, tipo, precio_actual):
+    """
+    Comprueba si la acción ya está en tendencia en la dirección de la apuesta.
+    Usa la media de 20 días como referencia.
+    Devuelve True si la tendencia confirma, False si contradice.
+    """
+    try:
+        stock = yf.Ticker(ticker)
+        hist  = stock.history(period="30d")
+        if len(hist) < 10:
+            return None
+        sma20 = hist["Close"].tail(20).mean()
+        if tipo == "CALL":
+            return precio_actual > sma20   # alcista si cotiza sobre su media
+        else:
+            return precio_actual < sma20   # bajista si cotiza bajo su media
+    except Exception:
+        return None
 
 
 def _obtener_oi_tradier(ticker):
@@ -203,7 +246,13 @@ def analizar_ticker(ticker, nombre):
                     if var_pct > MAX_VARIACION_PCT:
                         continue
 
-                    precio_op = round(float(row.get("lastPrice") or 0), 2)
+                    precio_op   = round(float(row.get("lastPrice") or 0), 2)
+                    iv          = round(float(row.get("impliedVolatility") or 0) * 100, 1)
+
+                    # Filtro 3: premium total mínimo — separa institucional de retail
+                    premium_usd = round(int(row["volume"]) * precio_op * 100)
+                    if premium_usd < MIN_PREMIUM_USD:
+                        continue
 
                     anomalias.append({
                         "ticker":               ticker,
@@ -217,14 +266,20 @@ def analizar_ticker(ticker, nombre):
                         "precio_actual":        precio,
                         "otm":                  es_otm,
                         "variacion_pct":        var_pct,
-                        "score":                score_anomalia(int(row["volume"]), round(row["ratio"], 1)),
+                        "premium_usd":          premium_usd,
+                        "iv":                   iv,
+                        "con_tendencia":        None,  # se calcula después
+                        "multi_vencimiento":    False, # se calcula después
+                        "catalizado_fda":       False, # se calcula después
+                        "score":                score_anomalia(int(row["volume"]), round(row["ratio"], 1),
+                                                               premium_usd=premium_usd),
                         "earnings":             None,
                         "ultimo_precio_opcion": precio_op,
                     })
     except Exception:
         pass
 
-    # Filtro 3: máximo MAX_SEÑALES_TICKER por empresa — quedarse con las de mayor score
+    # Filtro 4: máximo MAX_SEÑALES_TICKER por empresa — quedarse con las de mayor score
     anomalias.sort(key=lambda x: x["score"], reverse=True)
     return anomalias[:MAX_SEÑALES_TICKER]
 
@@ -723,7 +778,33 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
         for idx, a in enumerate(calls + puts, 1):
             c = generar_consejo(a)
             otm_txt = ' &nbsp;<span style="background:#e36700;color:white;font-size:10px;padding:2px 7px;border-radius:3px;font-weight:700">OTM</span>' if a["otm"] else ""
-            barra_riesgo = "●" * c['riesgo_barra'] + "○" * (4 - c['riesgo_barra'])
+
+            # Badges de convicción
+            badges = []
+            if a.get("catalizado_fda"):
+                badges.append('<span style="background:#7c3aed;color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">🏛️ CATALIZADOR FDA</span>')
+            if a.get("multi_vencimiento"):
+                badges.append('<span style="background:#0369a1;color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">📅 MULTI-VENCIMIENTO</span>')
+            if a.get("con_tendencia"):
+                badges.append('<span style="background:#15803d;color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">📈 CON TENDENCIA</span>')
+            elif a.get("con_tendencia") is False:
+                badges.append('<span style="background:#9ca3af;color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">⚠️ CONTRA TENDENCIA</span>')
+            badges_html = " ".join(badges)
+
+            # Premium formateado
+            premium_usd = a.get("premium_usd", 0)
+            if premium_usd >= 1_000_000:
+                premium_txt = f"${premium_usd/1_000_000:.1f}M"
+            elif premium_usd >= 1_000:
+                premium_txt = f"${premium_usd/1_000:.0f}k"
+            else:
+                premium_txt = f"${premium_usd}"
+
+            # IV
+            iv = a.get("iv", 0)
+            iv_txt = f"{iv:.0f}%" if iv > 0 else "—"
+            iv_color = "#cf222e" if iv > 80 else ("#9a6700" if iv > 50 else "#1a7f37")
+            iv_label = "cara" if iv > 80 else ("normal" if iv > 50 else "barata")
 
             html.append(f"""
         <div style="border:1px solid #ddd;border-radius:12px;margin-bottom:28px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.07)">
@@ -745,6 +826,7 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
                 <div style="margin-top:10px;font-size:12px;opacity:0.85;background:rgba(0,0,0,0.15);border-radius:6px;padding:8px 12px">
                     {c['contexto']}
                 </div>
+                {f'<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">{badges_html}</div>' if badges_html else ''}
             </div>
 
             <div style="padding:18px 20px">
@@ -752,27 +834,39 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
                 <!-- NUMEROS CLAVE -->
                 <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px">
                     <tr>
-                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:18%">
                             <div style="color:#888;font-size:11px;margin-bottom:3px">Precio hoy</div>
                             <div style="font-size:18px;font-weight:800;color:#1a1a1a">${a['precio_actual']}</div>
                         </td>
-                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">→</td>
-                        <td style="background:{c['bg_tipo']};border-radius:8px;padding:10px 12px;text-align:center;width:22%;border:2px solid {c['color_tipo']}22">
+                        <td style="width:2%;text-align:center;font-size:18px;color:#aaa">→</td>
+                        <td style="background:{c['bg_tipo']};border-radius:8px;padding:10px 12px;text-align:center;width:18%;border:2px solid {c['color_tipo']}22">
                             <div style="color:#888;font-size:11px;margin-bottom:3px">Objetivo</div>
                             <div style="font-size:18px;font-weight:800;color:{c['color_tipo']}">${a['strike']}</div>
                             <div style="font-size:10px;color:{c['color_tipo']}">{'+' if a['tipo']=='CALL' else '-'}{a['variacion_pct']}%</div>
                         </td>
-                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">·</td>
-                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                        <td style="width:2%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:18%">
                             <div style="color:#888;font-size:11px;margin-bottom:3px">Vence</div>
                             <div style="font-size:13px;font-weight:700">{c['venc_largo']}</div>
                             <div style="font-size:11px;color:{c['plazo_color']}">{c['plazo_badge']}</div>
                         </td>
-                        <td style="width:3%;text-align:center;font-size:18px;color:#aaa">·</td>
-                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:22%">
+                        <td style="width:2%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:18%">
                             <div style="color:#888;font-size:11px;margin-bottom:3px">Coste opcion</div>
                             <div style="font-size:16px;font-weight:800">{c['coste_txt']}</div>
-                            <div style="font-size:10px;color:#888">por contrato (100 acc.)</div>
+                            <div style="font-size:10px;color:#888">por contrato</div>
+                        </td>
+                        <td style="width:2%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:18%">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Prima apostada</div>
+                            <div style="font-size:16px;font-weight:800;color:#1a3a8f">{premium_txt}</div>
+                            <div style="font-size:10px;color:#888">total en mercado</div>
+                        </td>
+                        <td style="width:2%;text-align:center;font-size:18px;color:#aaa">·</td>
+                        <td style="background:#f6f8fa;border-radius:8px;padding:10px 12px;text-align:center;width:14%">
+                            <div style="color:#888;font-size:11px;margin-bottom:3px">Volatilidad</div>
+                            <div style="font-size:16px;font-weight:800;color:{iv_color}">{iv_txt}</div>
+                            <div style="font-size:10px;color:{iv_color}">{iv_label}</div>
                         </td>
                     </tr>
                 </table>
@@ -1189,7 +1283,7 @@ def main():
 
     calls = [a for a in todas if a["tipo"] == "CALL"]
     puts  = [a for a in todas if a["tipo"] == "PUT"]
-    print(f"\n\nResultados: {len(calls)} calls · {len(puts)} puts · {len(todas)} total")
+    print(f"\n\nResultados brutos: {len(calls)} calls · {len(puts)} puts · {len(todas)} total")
 
     # ── Calendario FDA ──
     print("Consultando calendario FDA (PDUFA)...")
@@ -1197,6 +1291,64 @@ def main():
     print(f"  Proximas decisiones FDA encontradas: {len(eventos_fda)}")
     for e in eventos_fda:
         print(f"    {e['ticker']} — {e['farmaco']} — {e['fecha']} ({e['dias_restantes']}d)")
+
+    # ── Post-procesado: enriquecer señales con contexto ──
+    print("Enriqueciendo señales con contexto...")
+
+    # Detección multi-vencimiento: tickers que aparecen en 2+ fechas distintas
+    from collections import defaultdict
+    venc_por_ticker = defaultdict(set)
+    for a in todas:
+        venc_por_ticker[a["ticker"]].add(a["vencimiento"])
+    tickers_multi = {t for t, fechas in venc_por_ticker.items() if len(fechas) >= 2}
+
+    # Mapa FDA: ticker -> lista de fechas PDUFA próximas
+    fda_por_ticker = defaultdict(list)
+    for e in eventos_fda:
+        fda_por_ticker[e["ticker"]].append(e["fecha"])
+
+    for a in todas:
+        ticker = a["ticker"]
+
+        # Tendencia (SMA20)
+        tendencia = obtener_tendencia(ticker, a["tipo"], a["precio_actual"])
+        a["con_tendencia"] = tendencia
+
+        # Multi-vencimiento
+        a["multi_vencimiento"] = ticker in tickers_multi
+
+        # Catalizador FDA: ¿la opción vence dentro de 5 días tras un PDUFA?
+        catalizado = False
+        for fda_fecha in fda_por_ticker.get(ticker, []):
+            try:
+                d_fda  = datetime.strptime(fda_fecha, "%Y-%m-%d").date()
+                d_venc = datetime.strptime(a["vencimiento"], "%Y-%m-%d").date()
+                if 0 <= (d_venc - d_fda).days <= 5:
+                    catalizado = True
+                    break
+            except Exception:
+                pass
+        a["catalizado_fda"] = catalizado
+
+        # Recalcular score con todos los factores
+        a["score"] = score_anomalia(
+            a["volumen"], a["ratio"],
+            premium_usd      = a.get("premium_usd", 0),
+            con_tendencia    = bool(tendencia),
+            multi_vencimiento= a["multi_vencimiento"],
+            catalizado_fda   = a["catalizado_fda"],
+        )
+
+    # Reordenar por score final
+    todas.sort(key=lambda x: x["score"], reverse=True)
+    print(f"  Señales tras enriquecimiento: {len(todas)}")
+    for a in todas[:5]:
+        flags = []
+        if a["catalizado_fda"]:   flags.append("🏛️FDA")
+        if a["multi_vencimiento"]: flags.append("📅MULTI")
+        if a["con_tendencia"]:     flags.append("📈TREND")
+        premium_k = round(a.get("premium_usd",0)/1000)
+        print(f"  {a['ticker']} {a['tipo']} score={a['score']} premium=${premium_k}k {' '.join(flags)}")
 
     # ── Track record ──
     print("Actualizando track record...")
