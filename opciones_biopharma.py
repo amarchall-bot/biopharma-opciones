@@ -67,10 +67,13 @@ TODOS_TICKERS = {**BIOFARMACEUTICAS, **ESPAÑOLAS_EN_EEUU}
 
 # ─── PARAMETROS ───────────────────────────────────────────────────────────────
 
-UMBRAL_VOL_OI     = 3.0
+UMBRAL_VOL_OI     = 5.0   # subido de 3x a 5x — más convicción institucional
 MIN_VOLUMEN       = 200
 MIN_OPEN_INTEREST = 50
 MAX_VENCIMIENTOS  = 3
+MIN_DIAS_VENCIMIENTO = 3   # ignorar opciones que vencen en menos de 3 días
+MAX_VARIACION_PCT    = 15.0  # ignorar apuestas que requieren >15% de movimiento
+MAX_SEÑALES_TICKER   = 2   # máximo 2 señales por empresa por día
 
 DESTINATARIOS  = ["amarchall@gmail.com", "cmarchal@marchalconsultores.com"]
 EMAIL_ORIGEN   = os.environ.get("EMAIL_ORIGEN", "")
@@ -159,6 +162,15 @@ def analizar_ticker(ticker, nombre):
         oi_tradier = _obtener_oi_tradier(ticker)
 
         for fecha in vencimientos[:MAX_VENCIMIENTOS]:
+
+            # Filtro 1: ignorar vencimientos demasiado cercanos
+            try:
+                dias_hasta_venc = (datetime.strptime(fecha, "%Y-%m-%d").date() - date.today()).days
+            except Exception:
+                dias_hasta_venc = 99
+            if dias_hasta_venc < MIN_DIAS_VENCIMIENTO:
+                continue
+
             chain = stock.option_chain(fecha)
             for tipo_label, df in [("CALL", chain.calls), ("PUT", chain.puts)]:
                 if df.empty:
@@ -166,13 +178,13 @@ def analizar_ticker(ticker, nombre):
                 df = df.copy()
 
                 # Enriquecer OI con datos de Tradier cuando esten disponibles
-                def get_oi(row):
-                    clave = (fecha, tipo_label, float(row["strike"]))
+                def get_oi(row, _fecha=fecha, _tipo=tipo_label):
+                    clave = (_fecha, _tipo, float(row["strike"]))
                     return oi_tradier.get(clave, row.get("openInterest") or 0)
 
                 df["oi_real"] = df.apply(get_oi, axis=1)
 
-                # Filtrar: volumen minimo + OI minimo
+                # Filtrar: volumen minimo + OI minimo + ratio minimo
                 df = df[(df["volume"] >= MIN_VOLUMEN) & (df["oi_real"] >= MIN_OPEN_INTEREST)]
                 if df.empty:
                     continue
@@ -186,6 +198,11 @@ def analizar_ticker(ticker, nombre):
                     es_otm    = (tipo_label == "CALL" and strike > precio) or \
                                 (tipo_label == "PUT"  and strike < precio)
                     var_pct   = round(abs(strike - precio) / precio * 100, 1) if precio > 0 else 0
+
+                    # Filtro 2: ignorar apuestas que requieren movimientos irreales
+                    if var_pct > MAX_VARIACION_PCT:
+                        continue
+
                     precio_op = round(float(row.get("lastPrice") or 0), 2)
 
                     anomalias.append({
@@ -206,7 +223,10 @@ def analizar_ticker(ticker, nombre):
                     })
     except Exception:
         pass
-    return anomalias
+
+    # Filtro 3: máximo MAX_SEÑALES_TICKER por empresa — quedarse con las de mayor score
+    anomalias.sort(key=lambda x: x["score"], reverse=True)
+    return anomalias[:MAX_SEÑALES_TICKER]
 
 
 # ─── RATIO PUT/CALL POR EMPRESA ───────────────────────────────────────────────
