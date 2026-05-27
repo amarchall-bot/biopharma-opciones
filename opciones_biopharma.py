@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Scanner de volumen anomalo en opciones — Biofarmaceuticas + Empresas españolas en EEUU.
-Datos via Tradier API (tiempo real). Email diario a amarchall@gmail.com.
+Datos via Yahoo Finance. Email diario a amarchall@gmail.com.
+Incluye: señales de opciones, ratio put/call, calendario FDA, track record.
 """
 
 import requests
@@ -11,9 +12,10 @@ import time
 import json
 import uuid
 import yfinance as yf
+from bs4 import BeautifulSoup
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 TRACK_RECORD_FILE = "track_record.json"
 
@@ -92,16 +94,69 @@ def score_anomalia(volume, ratio):
     return round(score, 1)
 
 
+def _obtener_oi_tradier(ticker):
+    """
+    Obtiene Open Interest por (fecha, tipo, strike) desde Tradier.
+    Devuelve dict: {(fecha, tipo, strike): oi}
+    """
+    oi_map = {}
+    if not TRADIER_TOKEN:
+        return oi_map
+    try:
+        # Primero obtenemos las fechas de vencimiento disponibles
+        r = requests.get(
+            f"{TRADIER_BASE}/options/expirations",
+            headers=TRADIER_HEADERS,
+            params={"symbol": ticker, "includeAllRoots": "true"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return oi_map
+        fechas = r.json().get("expirations", {}).get("date", [])
+        if isinstance(fechas, str):
+            fechas = [fechas]
+
+        # Consultamos los primeros MAX_VENCIMIENTOS
+        for fecha in fechas[:MAX_VENCIMIENTOS]:
+            r2 = requests.get(
+                f"{TRADIER_BASE}/options/chains",
+                headers=TRADIER_HEADERS,
+                params={"symbol": ticker, "expiration": fecha, "greeks": "false"},
+                timeout=10
+            )
+            if r2.status_code != 200:
+                continue
+            opts = r2.json().get("options") or {}
+            contratos = opts.get("option", []) if opts else []
+            if isinstance(contratos, dict):
+                contratos = [contratos]
+            for c in contratos:
+                oi = c.get("open_interest") or 0
+                tipo = "CALL" if c.get("option_type") == "call" else "PUT"
+                strike = float(c.get("strike", 0))
+                if oi > 0:
+                    oi_map[(fecha, tipo, strike)] = int(oi)
+    except Exception:
+        pass
+    return oi_map
+
+
 def analizar_ticker(ticker, nombre):
-    """Busca opciones con volumen anomalo usando Yahoo Finance."""
+    """
+    Busca opciones con volumen anomalo.
+    Volumen: Yahoo Finance (fiable). Open Interest: Tradier (fiable) con fallback a Yahoo.
+    """
     anomalias = []
     try:
-        stock         = yf.Ticker(ticker)
-        precio        = round(getattr(stock.fast_info, "last_price", 0) or 0, 2)
-        vencimientos  = stock.options
+        stock        = yf.Ticker(ticker)
+        precio       = round(getattr(stock.fast_info, "last_price", 0) or 0, 2)
+        vencimientos = stock.options
 
         if precio == 0 or not vencimientos:
             return anomalias
+
+        # OI de Tradier (mas preciso que Yahoo)
+        oi_tradier = _obtener_oi_tradier(ticker)
 
         for fecha in vencimientos[:MAX_VENCIMIENTOS]:
             chain = stock.option_chain(fecha)
@@ -109,33 +164,44 @@ def analizar_ticker(ticker, nombre):
                 if df.empty:
                     continue
                 df = df.copy()
-                df = df[(df["volume"] >= MIN_VOLUMEN) & (df["openInterest"] >= MIN_OPEN_INTEREST)]
+
+                # Enriquecer OI con datos de Tradier cuando esten disponibles
+                def get_oi(row):
+                    clave = (fecha, tipo_label, float(row["strike"]))
+                    return oi_tradier.get(clave, row.get("openInterest") or 0)
+
+                df["oi_real"] = df.apply(get_oi, axis=1)
+
+                # Filtrar: volumen minimo + OI minimo
+                df = df[(df["volume"] >= MIN_VOLUMEN) & (df["oi_real"] >= MIN_OPEN_INTEREST)]
                 if df.empty:
                     continue
-                df["ratio"] = df["volume"] / df["openInterest"]
+
+                df["ratio"] = df["volume"] / df["oi_real"]
                 df = df[df["ratio"] >= UMBRAL_VOL_OI]
 
                 for _, row in df.iterrows():
                     strike    = row["strike"]
+                    oi        = int(row["oi_real"])
                     es_otm    = (tipo_label == "CALL" and strike > precio) or \
                                 (tipo_label == "PUT"  and strike < precio)
                     var_pct   = round(abs(strike - precio) / precio * 100, 1) if precio > 0 else 0
                     precio_op = round(float(row.get("lastPrice") or 0), 2)
 
                     anomalias.append({
-                        "ticker":              ticker,
-                        "nombre":              nombre,
-                        "tipo":                tipo_label,
-                        "strike":              strike,
-                        "vencimiento":         fecha,
-                        "volumen":             int(row["volume"]),
-                        "open_interest":       int(row["openInterest"]),
-                        "ratio":               round(row["ratio"], 1),
-                        "precio_actual":       precio,
-                        "otm":                 es_otm,
-                        "variacion_pct":       var_pct,
-                        "score":               score_anomalia(int(row["volume"]), round(row["ratio"], 1)),
-                        "earnings":            None,
+                        "ticker":               ticker,
+                        "nombre":               nombre,
+                        "tipo":                 tipo_label,
+                        "strike":               strike,
+                        "vencimiento":          fecha,
+                        "volumen":              int(row["volume"]),
+                        "open_interest":        oi,
+                        "ratio":                round(row["ratio"], 1),
+                        "precio_actual":        precio,
+                        "otm":                  es_otm,
+                        "variacion_pct":        var_pct,
+                        "score":                score_anomalia(int(row["volume"]), round(row["ratio"], 1)),
+                        "earnings":             None,
                         "ultimo_precio_opcion": precio_op,
                     })
     except Exception:
@@ -146,7 +212,43 @@ def analizar_ticker(ticker, nombre):
 # ─── RATIO PUT/CALL POR EMPRESA ───────────────────────────────────────────────
 
 def calcular_ratio_put_call(ticker):
-    """Calcula el ratio put/call total para el primer vencimiento via Yahoo Finance."""
+    """
+    Calcula el ratio put/call usando OI de Tradier (mas preciso) con fallback a volumen de Yahoo.
+    Un ratio alto (>2) = presion bajista. Ratio bajo (<0.5) = presion alcista.
+    """
+    # Intentar con OI de Tradier primero (mas representativo que el volumen diario)
+    if TRADIER_TOKEN:
+        try:
+            r = requests.get(
+                f"{TRADIER_BASE}/options/expirations",
+                headers=TRADIER_HEADERS,
+                params={"symbol": ticker, "includeAllRoots": "true"},
+                timeout=10
+            )
+            if r.status_code == 200:
+                fechas = r.json().get("expirations", {}).get("date", [])
+                if isinstance(fechas, str):
+                    fechas = [fechas]
+                if fechas:
+                    r2 = requests.get(
+                        f"{TRADIER_BASE}/options/chains",
+                        headers=TRADIER_HEADERS,
+                        params={"symbol": ticker, "expiration": fechas[0], "greeks": "false"},
+                        timeout=10
+                    )
+                    if r2.status_code == 200:
+                        opts = r2.json().get("options") or {}
+                        contratos = opts.get("option", []) if opts else []
+                        if isinstance(contratos, dict):
+                            contratos = [contratos]
+                        oi_calls = sum(c.get("open_interest") or 0 for c in contratos if c.get("option_type") == "call")
+                        oi_puts  = sum(c.get("open_interest") or 0 for c in contratos if c.get("option_type") == "put")
+                        if oi_calls > 0:
+                            return round(oi_puts / oi_calls, 2)
+        except Exception:
+            pass
+
+    # Fallback: volumen de Yahoo Finance
     try:
         stock = yf.Ticker(ticker)
         fechas = stock.options
@@ -246,9 +348,244 @@ def generar_consejo(a):
                 ganancia_op2=ganancia_op2, riesgo_op2=riesgo_op2, nivel_riesgo=nivel_riesgo)
 
 
+# ─── CALENDARIO FDA (PDUFA) ──────────────────────────────────────────────────
+
+# Mapa de nombres parciales -> ticker (para cruzar con nuestros tickers)
+NOMBRE_A_TICKER = {
+    "abbvie": "ABBV", "amgen": "AMGN", "biogen": "BIIB",
+    "bristol": "BMY", "gilead": "GILD", "eli lilly": "LLY", "lilly": "LLY",
+    "merck": "MRK", "moderna": "MRNA", "pfizer": "PFE",
+    "regeneron": "REGN", "vertex": "VRTX", "alnylam": "ALNY",
+    "biomarin": "BMRN", "biopharma": None, "incyte": "INCY",
+    "jazz": "JAZZ", "neurocrine": "NBIX", "sarepta": "SRPT",
+    "halozyme": "HALO", "ionis": "IONS", "kymera": "KYMR",
+    "ultragenyx": "RARE", "acadia": "ACAD", "rocket": "RCKT",
+    "fate": "FATE", "xencor": "XNCR", "zymeworks": "ZYME",
+    "vaxcyte": "PCVX", "legend": "LEGN", "krystal": "KRYS",
+    "insmed": "INSM", "intellia": "NTLA", "beam": "BEAM",
+    "crispr": "CRSP", "editas": "EDIT",
+}
+
+
+def obtener_calendario_fda(dias_adelante=60):
+    """
+    Obtiene proximas fechas PDUFA de BiopharmaCatalyst y drugs.com.
+    Devuelve lista de dicts: {ticker, nombre, farmaco, fecha, dias_restantes, descripcion}
+    """
+    eventos = []
+
+    # ── Fuente 1: drugs.com/pdufa ──
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        }
+        resp = requests.get("https://www.drugs.com/pdufa/", headers=headers, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "lxml")
+            hoy  = date.today()
+
+            for row in soup.select("table tr"):
+                celdas = row.find_all("td")
+                if len(celdas) < 3:
+                    continue
+                try:
+                    fecha_txt = celdas[0].get_text(strip=True)
+                    farmaco   = celdas[1].get_text(strip=True)
+                    empresa   = celdas[2].get_text(strip=True) if len(celdas) > 2 else ""
+                    indicacion= celdas[3].get_text(strip=True) if len(celdas) > 3 else ""
+
+                    # Intentar parsear fecha
+                    fecha = None
+                    for fmt in ("%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+                        try:
+                            fecha = datetime.strptime(fecha_txt, fmt).date()
+                            break
+                        except ValueError:
+                            continue
+
+                    if fecha is None:
+                        continue
+
+                    dias = (fecha - hoy).days
+                    if dias < 0 or dias > dias_adelante:
+                        continue
+
+                    # Cruzar empresa con nuestros tickers
+                    empresa_lower = empresa.lower()
+                    ticker = None
+                    for clave, sym in NOMBRE_A_TICKER.items():
+                        if clave in empresa_lower and sym:
+                            ticker = sym
+                            break
+
+                    if ticker and ticker in TODOS_TICKERS:
+                        eventos.append({
+                            "ticker":         ticker,
+                            "nombre":         TODOS_TICKERS[ticker],
+                            "farmaco":        farmaco,
+                            "indicacion":     indicacion,
+                            "fecha":          str(fecha),
+                            "dias_restantes": dias,
+                            "fuente":         "drugs.com"
+                        })
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    # ── Fuente 2: biopharmacatalyst.com ──
+    if len(eventos) == 0:
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml",
+            }
+            resp = requests.get(
+                "https://www.biopharmacatalyst.com/calendars/fda-calendar",
+                headers=headers, timeout=15
+            )
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                hoy  = date.today()
+
+                for row in soup.select("tr.fda-event, tr[data-ticker]"):
+                    try:
+                        ticker_attr = row.get("data-ticker", "").upper().strip()
+                        if not ticker_attr or ticker_attr not in TODOS_TICKERS:
+                            continue
+
+                        fecha_cel  = row.select_one(".date, td:nth-child(1)")
+                        drug_cel   = row.select_one(".drug, td:nth-child(2)")
+                        indic_cel  = row.select_one(".indication, td:nth-child(3)")
+
+                        fecha_txt  = fecha_cel.get_text(strip=True) if fecha_cel else ""
+                        farmaco    = drug_cel.get_text(strip=True)  if drug_cel  else ""
+                        indicacion = indic_cel.get_text(strip=True) if indic_cel else ""
+
+                        fecha = None
+                        for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
+                            try:
+                                fecha = datetime.strptime(fecha_txt, fmt).date()
+                                break
+                            except ValueError:
+                                continue
+
+                        if fecha is None:
+                            continue
+
+                        dias = (fecha - hoy).days
+                        if dias < 0 or dias > dias_adelante:
+                            continue
+
+                        eventos.append({
+                            "ticker":         ticker_attr,
+                            "nombre":         TODOS_TICKERS[ticker_attr],
+                            "farmaco":        farmaco,
+                            "indicacion":     indicacion,
+                            "fecha":          str(fecha),
+                            "dias_restantes": dias,
+                            "fuente":         "biopharmacatalyst"
+                        })
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    # Deduplicar y ordenar por fecha
+    vistos = set()
+    resultado = []
+    for e in sorted(eventos, key=lambda x: x["fecha"]):
+        clave = f"{e['ticker']}-{e['fecha']}-{e['farmaco'][:10]}"
+        if clave not in vistos:
+            vistos.add(clave)
+            resultado.append(e)
+
+    return resultado
+
+
+def construir_seccion_fda(eventos_fda):
+    """Construye la seccion HTML del calendario FDA para el email."""
+    if not eventos_fda:
+        return ""
+
+    hoy = date.today()
+
+    html = ["""
+    <div style="background:#f0f4ff;border:2px solid #1a3a8f;border-radius:10px;margin-bottom:24px;overflow:hidden">
+        <div style="background:#1a3a8f;color:white;padding:14px 18px">
+            <h2 style="margin:0;font-size:16px">🏛️ Calendario FDA — Decisiones proximas</h2>
+            <p style="margin:4px 0 0 0;opacity:0.8;font-size:12px">
+                Fechas PDUFA: cuando la FDA debe aprobar o rechazar un medicamento.
+                Son los eventos que mas mueven las opciones biopharma.
+            </p>
+        </div>
+        <div style="padding:14px 18px">
+    """]
+
+    for e in eventos_fda:
+        dias  = e["dias_restantes"]
+        ticker = e["ticker"]
+        nombre = e["nombre"]
+        farmaco = e["farmaco"]
+        indicacion = e["indicacion"]
+
+        if dias <= 7:
+            urgencia_color = "#cf222e"
+            urgencia_txt   = f"🔴 <b>ESTA SEMANA</b> — {dias} dia{'s' if dias != 1 else ''}"
+            border_color   = "#cf222e"
+        elif dias <= 14:
+            urgencia_color = "#e36700"
+            urgencia_txt   = f"🟠 En <b>{dias} dias</b>"
+            border_color   = "#e36700"
+        elif dias <= 30:
+            urgencia_color = "#9a6700"
+            urgencia_txt   = f"🟡 En <b>{dias} dias</b>"
+            border_color   = "#9a6700"
+        else:
+            urgencia_color = "#555"
+            urgencia_txt   = f"🔵 En <b>{dias} dias</b>"
+            border_color   = "#aaa"
+
+        # Formatear fecha legible
+        try:
+            fecha_legible = datetime.strptime(e["fecha"], "%Y-%m-%d").strftime("%-d de %B de %Y")
+        except Exception:
+            fecha_legible = e["fecha"]
+
+        indicacion_html = f'<div style="font-size:11px;color:#555;margin-top:3px">{indicacion}</div>' if indicacion else ""
+
+        html.append(f"""
+        <div style="border-left:4px solid {border_color};background:white;border-radius:6px;
+                    padding:12px 14px;margin-bottom:10px;box-shadow:0 1px 3px rgba(0,0,0,0.06)">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+                <div>
+                    <span style="font-weight:bold;font-size:14px">{ticker}</span>
+                    <span style="color:#555;font-size:13px"> — {nombre}</span>
+                </div>
+                <span style="font-size:12px;color:{urgencia_color}">{urgencia_txt}</span>
+            </div>
+            <div style="margin-top:6px;font-size:13px">
+                💊 <b>{farmaco}</b>
+                {indicacion_html}
+            </div>
+            <div style="margin-top:4px;font-size:12px;color:#777">
+                📅 Fecha PDUFA: <b>{fecha_legible}</b>
+            </div>
+            <div style="margin-top:6px;font-size:12px;background:#fffbe6;border-radius:4px;padding:6px 8px;color:#7a5100">
+                ⚡ Una decision de la FDA puede mover la accion entre un 20% y un 80% en un dia.
+                Esto explica gran parte de la actividad inusual en opciones de esta empresa.
+            </div>
+        </div>""")
+
+    html.append("</div></div>")
+    return "\n".join(html)
+
+
 # ─── CONSTRUCCION DEL EMAIL ───────────────────────────────────────────────────
 
-def construir_email(todas_anomalias, ratios_pc):
+def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
     hoy   = datetime.now().strftime("%d/%m/%Y")
     calls = sorted([a for a in todas_anomalias if a["tipo"] == "CALL"], key=lambda x: x["score"], reverse=True)
     puts  = sorted([a for a in todas_anomalias if a["tipo"] == "PUT"],  key=lambda x: x["score"], reverse=True)
@@ -371,6 +708,10 @@ def construir_email(todas_anomalias, ratios_pc):
             <td style="padding:6px">{señal}</td></tr>
             """)
         html.append("</table></div>")
+
+    # ── Calendario FDA ──
+    if eventos_fda:
+        html.append(construir_seccion_fda(eventos_fda))
 
     # Track record (se pasa como parametro)
     html.append("<!-- TRACK_RECORD_PLACEHOLDER -->")
@@ -703,6 +1044,13 @@ def main():
     puts  = [a for a in todas if a["tipo"] == "PUT"]
     print(f"\n\nResultados: {len(calls)} calls · {len(puts)} puts · {len(todas)} total")
 
+    # ── Calendario FDA ──
+    print("Consultando calendario FDA (PDUFA)...")
+    eventos_fda = obtener_calendario_fda(dias_adelante=60)
+    print(f"  Proximas decisiones FDA encontradas: {len(eventos_fda)}")
+    for e in eventos_fda:
+        print(f"    {e['ticker']} — {e['farmaco']} — {e['fecha']} ({e['dias_restantes']}d)")
+
     # ── Track record ──
     print("Actualizando track record...")
     registros   = cargar_track_record()
@@ -713,7 +1061,7 @@ def main():
     print(f"  Señales evaluadas hoy:    {evaluados}")
 
     # ── Email ──
-    cuerpo           = construir_email(todas, ratios_pc)
+    cuerpo           = construir_email(todas, ratios_pc, eventos_fda=eventos_fda)
     seccion_track    = construir_seccion_track_record(registros, todos_registros=registros)
     cuerpo_final     = cuerpo.replace("<!-- TRACK_RECORD_PLACEHOLDER -->", seccion_track)
 
