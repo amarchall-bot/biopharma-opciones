@@ -408,12 +408,14 @@ def generar_consejo(a):
             contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
                         f"La apuesta es que <b>{nombre}</b> se mantendra por encima de <b>${strike}</b> "
                         f"(ahora cotiza a <b>${precio}</b>) durante los proximos {dias_restantes} dias.")
-        paso2 = f"Busca <b>{ticker}</b> → sección <b>Opciones</b>"
-        paso3 = f"Selecciona vencimiento: <b>{venc_largo}</b>"
-        paso4 = f"Compra <b>CALL</b> con strike <b>${strike}</b>"
-        accion_conservadora = f"Compra acciones de <b>{ticker}</b> a precio de mercado (~${precio})"
+        paso1_degiro = f'Abre <b>DeGiro</b> → busca "<b>{ticker}</b>" en el buscador'
+        paso2_degiro = f'En la ficha de {ticker}, pulsa <b>"Derivados"</b> en el menu lateral'
+        paso3_degiro = f'Filtra por <b>Opciones · Calls · {venc_largo}</b>'
+        paso4_degiro = f'Selecciona strike <b>${strike}</b> y pulsa <b>Comprar</b>'
+        paso5_degiro = f'Pon <b>1 contrato</b> como minimo (= 100 acciones · coste ~{coste_txt})'
+        accion_conservadora = f"Compra acciones de <b>{ticker}</b> en DeGiro a precio de mercado (~${precio})"
         ganancia_conservadora = f"Si {ticker} sube a ${strike}: ganas un <b>+{var_pct}%</b> por accion"
-        riesgo_conservadora = f"Pon un <b>stop-loss en ${stop_loss}</b> (-{stop_loss_pct}%) para limitar perdidas si baja"
+        riesgo_conservadora = f"Pon una orden <b>stop-loss en ${stop_loss}</b> (-{stop_loss_pct}%) para limitar perdidas si baja"
         nivel_conviccion = "alta" if ratio >= 10 else ("media" if ratio >= 7 else "moderada")
     else:
         color_tipo   = "#cf222e"
@@ -429,10 +431,12 @@ def generar_consejo(a):
             contexto = (f"Se detectaron <b>{volumen:,} contratos</b> con actividad <b>{ratio}x superior a lo normal</b>. "
                         f"La apuesta es que <b>{nombre}</b> va a caer por debajo de <b>${strike}</b> "
                         f"(ahora cotiza a <b>${precio}</b>) en los proximos {dias_restantes} dias.")
-        paso2 = f"Busca <b>{ticker}</b> → sección <b>Opciones</b>"
-        paso3 = f"Selecciona vencimiento: <b>{venc_largo}</b>"
-        paso4 = f"Compra <b>PUT</b> con strike <b>${strike}</b>"
-        accion_conservadora = f"Si tienes acciones de <b>{ticker}</b>, pon un stop-loss ahora"
+        paso1_degiro = f'Abre <b>DeGiro</b> → busca "<b>{ticker}</b>" en el buscador'
+        paso2_degiro = f'En la ficha de {ticker}, pulsa <b>"Derivados"</b> en el menu lateral'
+        paso3_degiro = f'Filtra por <b>Opciones · Puts · {venc_largo}</b>'
+        paso4_degiro = f'Selecciona strike <b>${strike}</b> y pulsa <b>Comprar</b>'
+        paso5_degiro = f'Pon <b>1 contrato</b> como minimo (= 100 acciones · coste ~{coste_txt})'
+        accion_conservadora = f"Si tienes acciones de <b>{ticker}</b>, pon un stop-loss ahora en DeGiro"
         ganancia_conservadora = f"Proteges tu cartera si {ticker} cae hacia ${strike}"
         riesgo_conservadora = f"Stop-loss sugerido: <b>${stop_loss}</b> (-{stop_loss_pct}% desde precio actual)"
         nivel_conviccion = "alta" if ratio >= 10 else ("media" if ratio >= 7 else "moderada")
@@ -464,7 +468,9 @@ def generar_consejo(a):
         plazo_badge=plazo_badge, plazo_color=plazo_color,
         resumen_1lin=resumen_1lin, contexto=contexto,
         coste_txt=coste_txt, coste_contrato=coste_contrato,
-        paso2=paso2, paso3=paso3, paso4=paso4,
+        paso1_degiro=paso1_degiro, paso2_degiro=paso2_degiro,
+        paso3_degiro=paso3_degiro, paso4_degiro=paso4_degiro,
+        paso5_degiro=paso5_degiro,
         escenario_ganar=escenario_ganar, escenario_perder=escenario_perder,
         accion_conservadora=accion_conservadora,
         ganancia_conservadora=ganancia_conservadora,
@@ -878,13 +884,17 @@ def construir_email(todas_anomalias, ratios_pc, eventos_fda=None):
                         <span style="float:right;background:{c['color_tipo']};color:white;font-size:10px;padding:2px 8px;border-radius:3px;font-weight:700">MAS AGRESIVO</span>
                     </div>
                     <div style="padding:12px 14px">
-                        <div style="font-size:13px;color:#555;margin-bottom:10px">Pasos a seguir en tu broker:</div>
-                        <div style="font-size:13px;line-height:2">
-                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">1</span> Abre tu broker (Interactive Brokers, Degiro...)<br>
-                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">2</span> {c['paso2']}<br>
-                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">3</span> {c['paso3']}<br>
-                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">4</span> {c['paso4']}<br>
-                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">5</span> Coste: <b>{c['coste_txt']} por contrato</b> (cada contrato = 100 acciones)
+                        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+                            <img src="https://www.degiro.es/favicon.ico" width="16" height="16" style="border-radius:3px" onerror="this.style.display='none'">
+                            <span style="font-size:13px;font-weight:700;color:#333">Pasos en DeGiro:</span>
+                            <span style="font-size:11px;color:#888">comision 0,75€ por contrato</span>
+                        </div>
+                        <div style="font-size:13px;line-height:2.1">
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">1</span> {c['paso1_degiro']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">2</span> {c['paso2_degiro']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">3</span> {c['paso3_degiro']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">4</span> {c['paso4_degiro']}<br>
+                            <span style="background:{c['color_tipo']};color:white;border-radius:50%;padding:1px 6px;font-size:11px;font-weight:700;margin-right:6px">5</span> {c['paso5_degiro']}
                         </div>
                         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
                             <div style="background:#f0fff4;border:1px solid #a8f0c0;border-radius:6px;padding:8px 12px;font-size:12px;flex:1">
